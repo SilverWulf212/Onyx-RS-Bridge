@@ -1,0 +1,78 @@
+# RepairShopr Connector Configuration
+# Copy to your Onyx installation and adjust values
+
+connector:
+  # Connector metadata
+  name: RepairShopr
+  display_name: RepairShopr
+  description: |
+    Connect to RepairShopr repair shop management system.
+    Indexes tickets, customers, assets, and invoices for AI-powered search.
+  source_type: REPAIRSHOPR
+  connector_class: repairshopr_connector.RepairShoprConnector
+
+  # Credential requirements
+  credential_type: api_key
+  credential_fields:
+    - name: api_key
+      display_name: API Key
+      description: Your RepairShopr API key from Admin -> Profile -> API Tokens
+      required: true
+      sensitive: true
+
+  # Connector configuration schema
+  config_schema:
+    subdomain:
+      type: string
+      display_name: Subdomain
+      description: Your RepairShopr subdomain (e.g., 'yourcompany' from yourcompany.repairshopr.com)
+      required: true
+      placeholder: yourcompany
+
+    include_tickets:
+      type: boolean
+      display_name: Include Tickets
+      description: Index repair tickets
+      default: true
+
+    include_customers:
+      type: boolean
+      display_name: Include Customers
+      description: Index customer profiles
+      default: true
+
+    include_assets:
+      type: boolean
+      display_name: Include Assets
+      description: Index customer devices/equipment
+      default: true
+
+    include_invoices:
+      type: boolean
+      display_name: Include Invoices
+      description: Index invoices
+      default: false
+
+    ticket_statuses:
+      type: array
+      display_name: Ticket Statuses
+      description: Only index tickets with these statuses (empty = all)
+      items:
+        type: string
+      default: []
+      placeholder: "New, In Progress, Resolved"
+
+  # Sync settings
+  sync:
+    # Full sync interval (24 hours)
+    full_sync_interval_hours: 24
+
+    # Poll interval for incremental updates (10 minutes)
+    poll_interval_minutes: 10
+
+    # Pruning interval for deleted documents (7 days)
+    prune_interval_days: 7
+
+  # Rate limiting
+  rate_limit:
+    requests_per_minute: 150  # RS allows 180, we use 150 for safety
