@@ -1,0 +1,60 @@
+# Docker Compose for RepairShopr-Onyx Bridge
+#
+# This configuration is for standalone testing and development.
+# For production, integrate the connector directly into Onyx.
+
+version: '3.8'
+
+services:
+  repairshopr-connector:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: rs-onyx-connector
+    restart: unless-stopped
+    environment:
+      # RepairShopr configuration (required)
+      - RS_SUBDOMAIN=${RS_SUBDOMAIN}
+      - RS_API_KEY=${RS_API_KEY}
+
+      # Data selection
+      - RS_INCLUDE_TICKETS=${RS_INCLUDE_TICKETS:-true}
+      - RS_INCLUDE_CUSTOMERS=${RS_INCLUDE_CUSTOMERS:-true}
+      - RS_INCLUDE_ASSETS=${RS_INCLUDE_ASSETS:-true}
+      - RS_INCLUDE_INVOICES=${RS_INCLUDE_INVOICES:-false}
+
+      # Sync configuration
+      - RS_POLL_INTERVAL_MINUTES=${RS_POLL_INTERVAL_MINUTES:-10}
+      - RS_REQUESTS_PER_MINUTE=${RS_REQUESTS_PER_MINUTE:-150}
+
+      # Onyx configuration (if using Ingestion API)
+      - ONYX_API_URL=${ONYX_API_URL:-http://onyx-api:8080}
+      - ONYX_API_KEY=${ONYX_API_KEY}
+
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      # Mount config for customization
+      - ./config:/app/config:ro
+    networks:
+      - onyx-network
+
+  # Optional: Redis for caching and deduplication
+  redis:
+    image: redis:7-alpine
+    container_name: rs-connector-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - onyx-network
+    profiles:
+      - with-cache
+
+networks:
+  onyx-network:
+    external: true
+    name: onyx_default
+
+volumes:
+  redis-data:
