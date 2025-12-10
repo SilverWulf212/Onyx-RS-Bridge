@@ -1,17 +1,18 @@
 """
-RepairShopr Connector for Onyx
+RepairShopr Connector for Onyx - Production Grade
 
-Main connector class that implements Onyx's connector interfaces
-for bulk loading, polling, and pruning RepairShopr data.
+Main connector class implementing Onyx's connector interfaces
+with proper state management, caching, and batch operations.
 """
 
-import asyncio
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import structlog
 
+from repairshopr_connector.cache import EntityCache
 from repairshopr_connector.client import RepairShoprClient
 from repairshopr_connector.document_builder import (
     DOC_PREFIX_ASSET,
@@ -21,7 +22,8 @@ from repairshopr_connector.document_builder import (
     OnyxDocument,
     RepairShoprDocumentBuilder,
 )
-from repairshopr_connector.models import RSAsset, RSCustomer, RSTicket
+from repairshopr_connector.models import RSAsset, RSCustomer
+from repairshopr_connector.state import StateManager, SyncCheckpoint
 
 logger = structlog.get_logger(__name__)
 
@@ -34,39 +36,31 @@ GenerateSlimDocumentOutput = Iterator[list[str]]
 
 class ConnectorMissingCredentialError(Exception):
     """Raised when required credentials are not provided."""
-
     pass
 
 
 class RepairShoprConnector:
     """
-    Onyx connector for RepairShopr repair shop management system.
+    Production-grade Onyx connector for RepairShopr.
 
-    Implements three connector types:
-    - LoadConnector: Full bulk indexing of all data
-    - PollConnector: Incremental updates based on timestamps
-    - SlimConnector: Lightweight ID-only checks for pruning
+    Improvements over v1:
+    - Synchronous (no async/sync mixing)
+    - Bounded LRU cache with TTL (no OOM)
+    - Batch enrichment (no N+1 queries)
+    - Checkpoint/resume for crash recovery
+    - Configurable comment handling
 
-    Configuration:
-        subdomain: Your RepairShopr subdomain (e.g., 'yourcompany')
-        include_tickets: Index tickets (default: True)
-        include_customers: Index customers (default: True)
-        include_assets: Index assets (default: True)
-        include_invoices: Index invoices (default: False)
-        ticket_statuses: Filter tickets by status (default: all)
-        batch_size: Documents per batch (default: 50)
+    Implements:
+    - LoadConnector: Full bulk indexing
+    - PollConnector: Incremental updates
+    - SlimConnector: Pruning deleted records
 
-    Usage:
+    Example:
         connector = RepairShoprConnector(subdomain="yourcompany")
-        connector.load_credentials({"api_key": "your-api-key"})
+        connector.load_credentials({"api_key": "your-key"})
 
-        # Full load
-        for doc_batch in connector.load_from_state():
-            process_documents(doc_batch)
-
-        # Incremental poll
-        for doc_batch in connector.poll_source(start_time, end_time):
-            process_documents(doc_batch)
+        for batch in connector.load_from_state():
+            send_to_onyx(batch)
     """
 
     def __init__(
@@ -76,33 +70,57 @@ class RepairShoprConnector:
         include_customers: bool = True,
         include_assets: bool = True,
         include_invoices: bool = False,
+        include_internal_comments: bool = False,  # Security: exclude by default
         ticket_statuses: list[str] | None = None,
         batch_size: int = 50,
+        state_file: str | Path | None = None,
+        cache_ttl_seconds: float = 600.0,
     ):
+        """
+        Initialize connector.
+
+        Args:
+            subdomain: Your RS subdomain (validated)
+            include_tickets: Index tickets
+            include_customers: Index customer profiles
+            include_assets: Index assets/devices
+            include_invoices: Index invoices
+            include_internal_comments: Include hidden/internal comments (security risk!)
+            ticket_statuses: Only index tickets with these statuses (None = all)
+            batch_size: Documents per batch
+            state_file: Path for checkpoint state (None = default location)
+            cache_ttl_seconds: Cache TTL for enrichment data
+        """
         self.subdomain = subdomain
         self.include_tickets = include_tickets
         self.include_customers = include_customers
         self.include_assets = include_assets
         self.include_invoices = include_invoices
+        self.include_internal_comments = include_internal_comments
         self.ticket_statuses = ticket_statuses
         self.batch_size = batch_size
 
         self._client: RepairShoprClient | None = None
         self._doc_builder: RepairShoprDocumentBuilder | None = None
 
-        # Caches for enrichment lookups
-        self._customer_cache: dict[int, RSCustomer] = {}
-        self._asset_cache: dict[int, RSAsset] = {}
+        # Bounded cache for enrichment
+        self._cache = EntityCache(ttl_seconds=cache_ttl_seconds)
+
+        # State management for checkpoint/resume
+        self._state_mgr = StateManager(state_file)
+        self._checkpoint: SyncCheckpoint | None = None
+
+        self._log = logger.bind(subdomain=subdomain)
 
     def load_credentials(self, credentials: dict[str, Any]) -> None:
         """
-        Load API credentials from Onyx's credential store.
+        Load API credentials.
 
         Args:
-            credentials: Dictionary containing 'api_key'
+            credentials: Dict with 'api_key'
 
         Raises:
-            ConnectorMissingCredentialError: If api_key is missing
+            ConnectorMissingCredentialError: If api_key missing
         """
         api_key = credentials.get("api_key")
         if not api_key:
@@ -115,85 +133,87 @@ class RepairShoprConnector:
             subdomain=self.subdomain,
             api_key=api_key,
         )
-        self._doc_builder = RepairShoprDocumentBuilder(subdomain=self.subdomain)
-
-        logger.info(
-            "Credentials loaded",
+        self._doc_builder = RepairShoprDocumentBuilder(
             subdomain=self.subdomain,
+            include_internal_comments=self.include_internal_comments,
+        )
+
+        # Load existing state
+        self._checkpoint = self._state_mgr.load()
+
+        self._log.info(
+            "Credentials loaded",
             include_tickets=self.include_tickets,
             include_customers=self.include_customers,
-            include_assets=self.include_assets,
+            include_internal_comments=self.include_internal_comments,
         )
 
     @property
     def client(self) -> RepairShoprClient:
         if self._client is None:
-            raise RuntimeError("Credentials not loaded. Call load_credentials() first.")
+            raise RuntimeError("Call load_credentials() first")
         return self._client
 
     @property
     def doc_builder(self) -> RepairShoprDocumentBuilder:
         if self._doc_builder is None:
-            raise RuntimeError("Credentials not loaded. Call load_credentials() first.")
+            raise RuntimeError("Call load_credentials() first")
         return self._doc_builder
 
-    def _run_async(self, coro):
-        """Run an async coroutine synchronously."""
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+    @property
+    def checkpoint(self) -> SyncCheckpoint:
+        if self._checkpoint is None:
+            self._checkpoint = self._state_mgr.load()
+        return self._checkpoint
 
-        return loop.run_until_complete(coro)
+    def _save_checkpoint(self) -> None:
+        """Save current checkpoint state."""
+        if self._checkpoint:
+            self._state_mgr.save(self._checkpoint)
 
-    async def _get_customer(self, customer_id: int) -> RSCustomer | None:
-        """Get customer with caching."""
-        if customer_id in self._customer_cache:
-            return self._customer_cache[customer_id]
+    # -------------------------------------------------------------------------
+    # Batch Enrichment (eliminates N+1 queries)
+    # -------------------------------------------------------------------------
 
-        try:
-            customer = await self.client.get_customer(customer_id)
-            self._customer_cache[customer_id] = customer
-            return customer
-        except Exception as e:
-            logger.warning("Failed to fetch customer", customer_id=customer_id, error=str(e))
-            return None
+    def _preload_enrichment_data(self) -> None:
+        """
+        Preload all customers and assets into cache.
 
-    async def _get_asset(self, asset_id: int) -> RSAsset | None:
-        """Get asset with caching."""
-        if asset_id in self._asset_cache:
-            return self._asset_cache[asset_id]
+        This eliminates N+1 queries by loading all enrichment data
+        upfront in just 2 paginated fetches instead of one per ticket.
+        """
+        self._log.info("Preloading enrichment data (customers + assets)")
 
-        try:
-            asset = await self.client.get_asset(asset_id)
-            self._asset_cache[asset_id] = asset
-            return asset
-        except Exception as e:
-            logger.warning("Failed to fetch asset", asset_id=asset_id, error=str(e))
-            return None
+        # Load all customers
+        customer_count = 0
+        for customer in self.client.iter_all_customers():
+            self._cache.customers.set(customer.id, customer)
+            customer_count += 1
 
-    async def _enrich_ticket(self, ticket: RSTicket) -> tuple[RSCustomer | None, RSAsset | None]:
-        """Fetch related customer and asset for a ticket."""
-        customer = None
-        asset = None
+        self._log.info("Preloaded customers", count=customer_count)
 
-        if ticket.customer_id:
-            customer = await self._get_customer(ticket.customer_id)
+        # Load all assets grouped by customer
+        asset_count = 0
+        assets_by_customer: dict[int, list[RSAsset]] = {}
+        for asset in self.client.iter_all_assets():
+            self._cache.assets.set(asset.id, asset)
+            if asset.customer_id:
+                assets_by_customer.setdefault(asset.customer_id, []).append(asset)
+            asset_count += 1
 
-        # Get first linked asset if available
-        if ticket.assets:
-            asset = ticket.assets[0]
-        elif ticket.customer_id:
-            # Try to get customer's primary asset
-            try:
-                assets_response = await self.client.get_assets(customer_id=ticket.customer_id)
-                if assets_response.assets:
-                    asset = assets_response.assets[0]
-            except Exception:
-                pass
+        # Cache assets by customer for quick lookup
+        for cust_id, assets in assets_by_customer.items():
+            self._cache.assets_by_customer.set(cust_id, assets)
 
-        return customer, asset
+        self._log.info("Preloaded assets", count=asset_count)
+
+    def _get_customer_cached(self, customer_id: int) -> RSCustomer | None:
+        """Get customer from cache (no API call)."""
+        return self._cache.customers.get(customer_id)
+
+    def _get_customer_assets_cached(self, customer_id: int) -> list[RSAsset]:
+        """Get customer's assets from cache (no API call)."""
+        return self._cache.assets_by_customer.get(customer_id) or []
 
     # -------------------------------------------------------------------------
     # LoadConnector Interface
@@ -201,159 +221,178 @@ class RepairShoprConnector:
 
     def load_from_state(self) -> GenerateDocumentsOutput:
         """
-        Full load - fetch all documents from RepairShopr.
+        Full load with checkpoint support.
 
-        This is used for initial indexing and periodic full refreshes.
-        Yields batches of documents to avoid memory issues.
+        If a previous sync was interrupted, resumes from checkpoint.
         """
-        logger.info("Starting full load from RepairShopr")
+        self._log.info("Starting full load")
+        self.checkpoint.reset_for_new_sync("full")
+        self._save_checkpoint()
 
-        async def _load_all():
-            async with self.client:
-                # Load customers first (for enrichment)
-                if self.include_customers:
-                    async for batch in self._load_customers():
-                        yield batch
+        with self.client:
+            # Preload enrichment data (eliminates N+1)
+            self._preload_enrichment_data()
 
-                # Load assets (for enrichment)
-                if self.include_assets:
-                    async for batch in self._load_assets():
-                        yield batch
+            # Load customers
+            if self.include_customers and not self.checkpoint.customers_complete:
+                yield from self._load_customers()
+                self.checkpoint.customers_complete = True
+                self._save_checkpoint()
 
-                # Load tickets (main content)
-                if self.include_tickets:
-                    async for batch in self._load_tickets():
-                        yield batch
+            # Load assets
+            if self.include_assets and not self.checkpoint.assets_complete:
+                yield from self._load_assets()
+                self.checkpoint.assets_complete = True
+                self._save_checkpoint()
 
-                # Load invoices
-                if self.include_invoices:
-                    async for batch in self._load_invoices():
-                        yield batch
+            # Load tickets (main content)
+            if self.include_tickets and not self.checkpoint.tickets_complete:
+                yield from self._load_tickets()
+                self.checkpoint.tickets_complete = True
+                self._save_checkpoint()
 
-        # Convert async generator to sync
-        async def collect_batches():
-            batches = []
-            async for batch in _load_all():
-                batches.append(batch)
-            return batches
+            # Load invoices
+            if self.include_invoices and not self.checkpoint.invoices_complete:
+                yield from self._load_invoices()
+                self.checkpoint.invoices_complete = True
+                self._save_checkpoint()
 
-        batches = self._run_async(collect_batches())
-        for batch in batches:
-            yield batch
+        # Mark complete
+        self.checkpoint.mark_complete()
+        self._save_checkpoint()
 
-    async def _load_tickets(
+        self._log.info(
+            "Full load complete",
+            documents=self.checkpoint.documents_processed,
+            errors=len(self.checkpoint.errors),
+        )
+
+    def _load_tickets(
         self,
         since: datetime | None = None,
-    ) -> Iterator[list[OnyxDocument]]:
-        """Load tickets with enrichment."""
+    ) -> GenerateDocumentsOutput:
+        """Load tickets with cached enrichment."""
         batch: list[OnyxDocument] = []
-        count = 0
 
-        async for ticket in self.client.iter_all_tickets(since=since):
+        for ticket in self.client.iter_all_tickets(
+            since=since,
+            fetch_comments=True,
+            seen_ids=self.checkpoint.tickets_seen_ids,
+        ):
             # Filter by status if configured
             if self.ticket_statuses and ticket.status not in self.ticket_statuses:
                 continue
 
-            # Enrich with customer and asset data
-            customer, asset = await self._enrich_ticket(ticket)
+            # Get enrichment from cache (NO API calls!)
+            customer = None
+            asset = None
+            if ticket.customer_id:
+                customer = self._get_customer_cached(ticket.customer_id)
+                assets = self._get_customer_assets_cached(ticket.customer_id)
+                if assets:
+                    asset = assets[0]
 
             # Build document
-            doc = self.doc_builder.build_ticket_document(ticket, customer, asset)
-            batch.append(doc)
-            count += 1
+            try:
+                doc = self.doc_builder.build_ticket_document(ticket, customer, asset)
+                batch.append(doc)
+                self.checkpoint.documents_processed += 1
+            except Exception as e:
+                self.checkpoint.errors.append(f"Ticket {ticket.id}: {e}")
+                self._log.warning("Failed to build ticket doc", ticket_id=ticket.id, error=str(e))
 
             if len(batch) >= self.batch_size:
-                logger.info("Yielding ticket batch", count=count)
+                self._log.info("Yielding ticket batch", count=len(batch))
                 yield batch
                 batch = []
+                self._save_checkpoint()
 
         if batch:
-            logger.info("Yielding final ticket batch", count=count)
             yield batch
+            self._save_checkpoint()
 
-    async def _load_customers(
+    def _load_customers(
         self,
         since: datetime | None = None,
-    ) -> Iterator[list[OnyxDocument]]:
+    ) -> GenerateDocumentsOutput:
         """Load customer documents."""
         batch: list[OnyxDocument] = []
-        count = 0
 
-        async for customer in self.client.iter_all_customers(since=since):
-            # Cache for ticket enrichment
-            self._customer_cache[customer.id] = customer
-
-            # Build document
-            doc = self.doc_builder.build_customer_document(customer)
-            batch.append(doc)
-            count += 1
+        for customer in self.client.iter_all_customers(
+            since=since,
+            seen_ids=self.checkpoint.customers_seen_ids,
+        ):
+            try:
+                doc = self.doc_builder.build_customer_document(customer)
+                batch.append(doc)
+                self.checkpoint.documents_processed += 1
+            except Exception as e:
+                self.checkpoint.errors.append(f"Customer {customer.id}: {e}")
 
             if len(batch) >= self.batch_size:
-                logger.info("Yielding customer batch", count=count)
+                self._log.info("Yielding customer batch", count=len(batch))
                 yield batch
                 batch = []
+                self._save_checkpoint()
 
         if batch:
-            logger.info("Yielding final customer batch", count=count)
             yield batch
 
-    async def _load_assets(
+    def _load_assets(
         self,
         since: datetime | None = None,
-    ) -> Iterator[list[OnyxDocument]]:
+    ) -> GenerateDocumentsOutput:
         """Load asset documents."""
         batch: list[OnyxDocument] = []
-        count = 0
 
-        async for asset in self.client.iter_all_assets(since=since):
-            # Cache for ticket enrichment
-            self._asset_cache[asset.id] = asset
+        for asset in self.client.iter_all_assets(
+            since=since,
+            seen_ids=self.checkpoint.assets_seen_ids,
+        ):
+            customer = self._get_customer_cached(asset.customer_id) if asset.customer_id else None
 
-            # Get owner customer
-            customer = None
-            if asset.customer_id:
-                customer = await self._get_customer(asset.customer_id)
-
-            # Build document
-            doc = self.doc_builder.build_asset_document(asset, customer)
-            batch.append(doc)
-            count += 1
+            try:
+                doc = self.doc_builder.build_asset_document(asset, customer)
+                batch.append(doc)
+                self.checkpoint.documents_processed += 1
+            except Exception as e:
+                self.checkpoint.errors.append(f"Asset {asset.id}: {e}")
 
             if len(batch) >= self.batch_size:
-                logger.info("Yielding asset batch", count=count)
+                self._log.info("Yielding asset batch", count=len(batch))
                 yield batch
                 batch = []
+                self._save_checkpoint()
 
         if batch:
-            logger.info("Yielding final asset batch", count=count)
             yield batch
 
-    async def _load_invoices(
+    def _load_invoices(
         self,
         since: datetime | None = None,
-    ) -> Iterator[list[OnyxDocument]]:
+    ) -> GenerateDocumentsOutput:
         """Load invoice documents."""
         batch: list[OnyxDocument] = []
-        count = 0
 
-        async for invoice in self.client.iter_all_invoices(since=since):
-            # Get customer
-            customer = None
-            if invoice.customer_id:
-                customer = await self._get_customer(invoice.customer_id)
+        for invoice in self.client.iter_all_invoices(
+            since=since,
+            seen_ids=self.checkpoint.invoices_seen_ids,
+        ):
+            customer = self._get_customer_cached(invoice.customer_id) if invoice.customer_id else None
 
-            # Build document
-            doc = self.doc_builder.build_invoice_document(invoice, customer)
-            batch.append(doc)
-            count += 1
+            try:
+                doc = self.doc_builder.build_invoice_document(invoice, customer)
+                batch.append(doc)
+                self.checkpoint.documents_processed += 1
+            except Exception as e:
+                self.checkpoint.errors.append(f"Invoice {invoice.id}: {e}")
 
             if len(batch) >= self.batch_size:
-                logger.info("Yielding invoice batch", count=count)
                 yield batch
                 batch = []
+                self._save_checkpoint()
 
         if batch:
-            logger.info("Yielding final invoice batch", count=count)
             yield batch
 
     # -------------------------------------------------------------------------
@@ -366,55 +405,38 @@ class RepairShoprConnector:
         end: SecondsSinceUnixEpoch,
     ) -> GenerateDocumentsOutput:
         """
-        Incremental poll - fetch documents updated since last poll.
-
-        Args:
-            start: Unix timestamp of last successful poll
-            end: Unix timestamp of current poll
-
-        Yields:
-            Batches of documents updated in the time range
+        Incremental poll for updates since last sync.
         """
         start_dt = datetime.fromtimestamp(start, tz=timezone.utc)
         end_dt = datetime.fromtimestamp(end, tz=timezone.utc)
 
-        logger.info(
+        self._log.info(
             "Starting incremental poll",
             start=start_dt.isoformat(),
             end=end_dt.isoformat(),
         )
 
-        async def _poll_all():
-            async with self.client:
-                # Poll customers
-                if self.include_customers:
-                    async for batch in self._load_customers(since=start_dt):
-                        yield batch
+        self.checkpoint.reset_for_new_sync("poll")
 
-                # Poll assets
-                if self.include_assets:
-                    async for batch in self._load_assets(since=start_dt):
-                        yield batch
+        with self.client:
+            # For poll, we still preload since we need enrichment
+            # but it's faster because we only process changed records
+            self._preload_enrichment_data()
 
-                # Poll tickets
-                if self.include_tickets:
-                    async for batch in self._load_tickets(since=start_dt):
-                        yield batch
+            if self.include_customers:
+                yield from self._load_customers(since=start_dt)
 
-                # Poll invoices
-                if self.include_invoices:
-                    async for batch in self._load_invoices(since=start_dt):
-                        yield batch
+            if self.include_assets:
+                yield from self._load_assets(since=start_dt)
 
-        async def collect_batches():
-            batches = []
-            async for batch in _poll_all():
-                batches.append(batch)
-            return batches
+            if self.include_tickets:
+                yield from self._load_tickets(since=start_dt)
 
-        batches = self._run_async(collect_batches())
-        for batch in batches:
-            yield batch
+            if self.include_invoices:
+                yield from self._load_invoices(since=start_dt)
+
+        self.checkpoint.mark_complete()
+        self._save_checkpoint()
 
     # -------------------------------------------------------------------------
     # SlimConnector Interface
@@ -422,80 +444,69 @@ class RepairShoprConnector:
 
     def retrieve_all_slim_documents(self) -> GenerateSlimDocumentOutput:
         """
-        Retrieve only document IDs for pruning deleted records.
-
-        This is a lightweight check to identify documents that
-        have been deleted from RepairShopr and should be removed
-        from Onyx.
-
-        Yields:
-            Batches of document IDs
+        Get all document IDs for pruning deleted records.
         """
-        logger.info("Starting slim document retrieval for pruning")
+        self._log.info("Starting slim document retrieval")
 
-        async def _get_all_ids():
-            async with self.client:
-                ids: list[str] = []
+        with self.client:
+            batch: list[str] = []
 
-                # Ticket IDs
-                if self.include_tickets:
-                    async for ticket_id in self.client.get_all_ticket_ids():
-                        ids.append(f"{DOC_PREFIX_TICKET}{ticket_id}")
-                        if len(ids) >= self.batch_size:
-                            yield ids
-                            ids = []
+            # Ticket IDs
+            if self.include_tickets:
+                for ticket in self.client.iter_all_tickets(fetch_comments=False):
+                    batch.append(f"{DOC_PREFIX_TICKET}{ticket.id}")
+                    if len(batch) >= self.batch_size:
+                        yield batch
+                        batch = []
 
-                # Customer IDs
-                if self.include_customers:
-                    async for customer_id in self.client.get_all_customer_ids():
-                        ids.append(f"{DOC_PREFIX_CUSTOMER}{customer_id}")
-                        if len(ids) >= self.batch_size:
-                            yield ids
-                            ids = []
+            # Customer IDs
+            if self.include_customers:
+                for customer in self.client.iter_all_customers():
+                    batch.append(f"{DOC_PREFIX_CUSTOMER}{customer.id}")
+                    if len(batch) >= self.batch_size:
+                        yield batch
+                        batch = []
 
-                # Asset IDs
-                if self.include_assets:
-                    async for asset_id in self.client.get_all_asset_ids():
-                        ids.append(f"{DOC_PREFIX_ASSET}{asset_id}")
-                        if len(ids) >= self.batch_size:
-                            yield ids
-                            ids = []
+            # Asset IDs
+            if self.include_assets:
+                for asset in self.client.iter_all_assets():
+                    batch.append(f"{DOC_PREFIX_ASSET}{asset.id}")
+                    if len(batch) >= self.batch_size:
+                        yield batch
+                        batch = []
 
-                if ids:
-                    yield ids
+            # Invoice IDs
+            if self.include_invoices:
+                for invoice in self.client.iter_all_invoices():
+                    batch.append(f"{DOC_PREFIX_INVOICE}{invoice.id}")
+                    if len(batch) >= self.batch_size:
+                        yield batch
+                        batch = []
 
-        async def collect_batches():
-            batches = []
-            async for batch in _get_all_ids():
-                batches.append(batch)
-            return batches
+            if batch:
+                yield batch
 
-        batches = self._run_async(collect_batches())
-        for batch in batches:
-            yield batch
+    # -------------------------------------------------------------------------
+    # Observability
+    # -------------------------------------------------------------------------
 
+    def get_stats(self) -> dict[str, Any]:
+        """Get connector statistics for monitoring."""
+        stats = {
+            "subdomain": self.subdomain,
+            "checkpoint": self.checkpoint.to_dict() if self._checkpoint else None,
+            "cache": self._cache.get_stats(),
+        }
 
-# Convenience function for standalone testing
-def main():
-    """Test the connector with environment variables."""
-    import os
+        if self._client:
+            stats["client"] = self._client.get_stats()
 
-    subdomain = os.environ.get("RS_SUBDOMAIN")
-    api_key = os.environ.get("RS_API_KEY")
+        return stats
 
-    if not subdomain or not api_key:
-        print("Set RS_SUBDOMAIN and RS_API_KEY environment variables")
-        return
+    def health_check(self) -> dict[str, Any]:
+        """Check connectivity and return health status."""
+        if self._client is None:
+            return {"status": "not_configured", "message": "Call load_credentials() first"}
 
-    connector = RepairShoprConnector(subdomain=subdomain)
-    connector.load_credentials({"api_key": api_key})
-
-    print("Testing full load...")
-    for batch in connector.load_from_state():
-        print(f"Received batch of {len(batch)} documents")
-        for doc in batch[:3]:  # Print first 3 of each batch
-            print(f"  - {doc.semantic_identifier}")
-
-
-if __name__ == "__main__":
-    main()
+        with self.client:
+            return self.client.health_check()

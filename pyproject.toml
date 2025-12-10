@@ -4,21 +4,24 @@ build-backend = "hatchling.build"
 
 [project]
 name = "onyx-repairshopr-connector"
-version = "0.1.0"
-description = "Onyx connector for RepairShopr repair shop management system"
+version = "2.0.0"
+description = "Production-grade Onyx connector for RepairShopr repair shop management system"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
     { name = "SilverWulf212" }
 ]
-keywords = ["onyx", "repairshopr", "connector", "ai", "knowledge-base"]
+keywords = ["onyx", "repairshopr", "connector", "ai", "knowledge-base", "repair-shop"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 dependencies = [
@@ -28,7 +31,11 @@ dependencies = [
     "tenacity>=8.2.0",
     "python-dateutil>=2.8.0",
     "structlog>=24.1.0",
+    "colorama>=0.4.6",
 ]
+
+[project.scripts]
+rs-onyx = "repairshopr_connector.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -43,6 +50,8 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/SilverWulf212/Onyx-RS-Bridge"
 Repository = "https://github.com/SilverWulf212/Onyx-RS-Bridge"
+Documentation = "https://github.com/SilverWulf212/Onyx-RS-Bridge#readme"
+Issues = "https://github.com/SilverWulf212/Onyx-RS-Bridge/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/repairshopr_connector"]

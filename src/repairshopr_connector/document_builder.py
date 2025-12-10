@@ -109,9 +109,20 @@ class RepairShoprDocumentBuilder:
     relationships between entities.
     """
 
-    def __init__(self, subdomain: str):
+    def __init__(self, subdomain: str, include_internal_comments: bool = False):
+        """
+        Initialize document builder.
+
+        Args:
+            subdomain: Your RS subdomain
+            include_internal_comments: Whether to include hidden/internal comments.
+                                       Default False for security - internal comments
+                                       may contain sensitive information not intended
+                                       for AI search.
+        """
         self.subdomain = subdomain
         self.base_url = f"https://{subdomain}.repairshopr.com"
+        self.include_internal_comments = include_internal_comments
 
     def _ticket_url(self, ticket_id: int) -> str:
         return f"{self.base_url}/tickets/{ticket_id}"
@@ -231,7 +242,7 @@ class RepairShoprDocumentBuilder:
             "",
             "WORK HISTORY / COMMENTS:",
             "-" * 30,
-            self._format_comments(ticket.comments),
+            self._format_comments(ticket.comments, include_internal=self.include_internal_comments),
             "",
             "PARTS & LABOR:",
             "-" * 30,
