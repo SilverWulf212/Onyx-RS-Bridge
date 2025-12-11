@@ -1,6 +1,6 @@
 # Developer Handoff: Onyx-RS-Bridge
 
-**Last Updated:** 2025-12-11 02:45 UTC
+**Last Updated:** 2025-12-11 03:15 UTC
 
 ## Project Overview
 
@@ -108,6 +108,12 @@ cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
 7. **Onyx API errors not visible** - All 50 docs failed but no error details
    - Fix: Added debug logging to print endpoint and first 3 error responses
    - Commit: `4ab9914`
+
+8. **Wrong Onyx API endpoint** - Was using `/api/v1/manage/admin/connector/file/upload` (404)
+   - Discovery: Used `find_endpoints.py` to query `/openapi.json`
+   - Found correct endpoint: `/onyx-api/ingestion` ("Upsert Ingestion Doc")
+   - Fix: Updated `cli.py` to use correct endpoint
+   - Commit: (pending)
 
 ## Current Issue to Debug
 

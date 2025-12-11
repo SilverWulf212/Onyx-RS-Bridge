@@ -223,8 +223,8 @@ def send_to_onyx(documents: list, onyx_url: str, onyx_api_key: str, verbose: boo
 
     results = {"success": 0, "failed": 0, "errors": []}
 
-    # Onyx document ingestion endpoint
-    endpoint = f"{onyx_url.rstrip('/')}/api/v1/manage/admin/connector/file/upload"
+    # Onyx document ingestion endpoint (discovered via /openapi.json)
+    endpoint = f"{onyx_url.rstrip('/')}/onyx-api/ingestion"
 
     headers = {
         "Authorization": f"Bearer {onyx_api_key}",
