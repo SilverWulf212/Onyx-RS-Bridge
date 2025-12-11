@@ -1,6 +1,6 @@
 # Developer Handoff: Onyx-RS-Bridge
 
-**Last Updated:** 2025-12-11 03:15 UTC
+**Last Updated:** 2025-12-11 03:25 UTC
 
 ## Project Overview
 
@@ -115,36 +115,70 @@ cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
    - Fix: Updated `cli.py` to use correct endpoint
    - Commit: (pending)
 
-## Current Issue to Debug
+## Current Status & Path to MVP
 
-The Onyx ingestion is newly added in `cli.py:send_to_onyx()`. It's using this endpoint:
+### Where We Are Now
+
+1. **RepairShopr side: WORKING** ✅
+   - Fetching tickets, customers, assets from RS API
+   - Rate limiting, retry logic, checkpoint/resume all working
+   - Documents being built correctly
+
+2. **Onyx side: ALMOST WORKING** 🔄
+   - Found correct endpoint: `POST /onyx-api/ingestion`
+   - Discovered via OpenAPI spec at `/openapi.json`
+   - Need to verify our document format matches Onyx's `DocumentBase` schema
+
+### What We Just Discovered
+
+**Correct Onyx Ingestion Endpoint:**
 ```
-POST /api/v1/manage/admin/connector/file/upload
+POST /onyx-api/ingestion
+Summary: "Upsert Ingestion Doc"
 ```
 
-This may not be the correct Onyx endpoint. Need to:
-1. Check Onyx API docs for correct ingestion endpoint
-2. Verify the payload format Onyx expects
-3. Test with a single document first
-
-## Onyx API Investigation Needed
-
-The current `send_to_onyx()` function sends:
-```python
-payload = {"document": doc.to_dict()}
+**Expected Payload Structure:**
+```json
+{
+  "document": {
+    // DocumentBase schema - need to verify fields match
+  },
+  "cc_pair_id": null  // optional
+}
 ```
 
-To endpoint: `/api/v1/manage/admin/connector/file/upload`
+### Next Steps to MVP
 
-This is likely wrong. Onyx ingestion typically works via:
-1. **Native connector** - Register as a connector in Onyx codebase
-2. **Ingestion API** - Push documents to a specific endpoint
-3. **File upload** - Upload files that Onyx processes
+1. **Check DocumentBase schema** (in progress)
+   - Run: `cat docker/check_document_base.py | docker exec -i rs-onyx-connector python3`
+   - Compare with our `OnyxDocument.to_dict()` output
 
-Need to check:
-- Onyx source code or API docs for correct endpoint
-- Required authentication headers
-- Expected payload format
+2. **Fix payload format if needed**
+   - Our `document_builder.py` creates documents with: id, sections, source, semantic_identifier, metadata, doc_updated_at, primary_owners, secondary_owners, title
+   - Onyx may expect different field names or structure
+
+3. **Rebuild and test with small batch**
+   - Once schema matches, rebuild container
+   - Run sync - should see "Sent to Onyx: 50" instead of "Failed: 50"
+
+4. **Verify in Onyx UI**
+   - Check Onyx web interface for ingested documents
+   - Test search functionality
+
+5. **Scale to full 22k tickets**
+   - Once MVP works, run full sync
+   - Monitor for rate limits or errors
+
+### Debug Scripts Available
+
+| Script | Purpose |
+|--------|---------|
+| `docker/probe_onyx.py` | Check which endpoints exist |
+| `docker/find_endpoints.py` | Find document/ingestion endpoints |
+| `docker/check_ingestion_schema.py` | Show ingestion endpoint schema |
+| `docker/check_document_base.py` | Show DocumentBase schema |
+
+Usage: `cat docker/<script>.py | docker exec -i rs-onyx-connector python3`
 
 ## Architecture
 
