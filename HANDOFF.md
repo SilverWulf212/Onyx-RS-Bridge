@@ -122,23 +122,12 @@ cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
    - Fix: Updated `document_builder.py` with `_stringify_metadata()` helper
    - Commit: `549af6e`
 
-10. **HTTP 401 Invalid API key** - Onyx rejecting authentication (CURRENT ISSUE)
+10. **HTTP 401 Invalid API key** - Onyx rejecting authentication (FIXED)
     - Endpoint now correct: `/onyx-api/ingestion`
     - Schema now correct: documents formatted properly
-    - Error: `{"detail":"Invalid API key"}`
-    - Likely cause: API key not being passed correctly, or wrong key format
-    - Debug commands:
-      ```bash
-      # Check API key in container
-      docker exec rs-onyx-connector printenv ONYX_API_KEY | head -c 30
-
-      # Check API key in .env file
-      grep ONYX_API_KEY ~/Onyx-RS-Bridge/docker/.env | head -c 50
-      ```
-    - Things to verify:
-      1. Is the Onyx API key valid? (check in Onyx Admin UI)
-      2. Is it a user API key or admin API key? (ingestion may require admin)
-      3. Is the `Authorization: Bearer <key>` format correct for Onyx?
+    - **Root Cause**: Self-hosted Onyx uses `x-onyx-key` header, NOT `Authorization: Bearer`
+    - **Fix**: Changed header from `Authorization: Bearer {key}` to `x-onyx-key: {key}`
+    - Commit: (pending)
 
 ## Current Status & Path to MVP
 
@@ -158,9 +147,9 @@ cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
    - Metadata values converted to strings
    - `from_ingestion_api: true` flag added
 
-4. **Onyx authentication: FAILING** ❌
-   - HTTP 401: `{"detail":"Invalid API key"}`
-   - Need to verify API key is valid and has correct permissions
+4. **Onyx authentication: FIXED** ✅
+   - Changed from `Authorization: Bearer` to `x-onyx-key` header
+   - Self-hosted Onyx uses different auth format than Onyx Cloud
 
 ### Schema Analysis (Deep Dive)
 

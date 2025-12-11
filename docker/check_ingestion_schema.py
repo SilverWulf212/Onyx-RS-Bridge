@@ -7,7 +7,7 @@ import json
 url = os.environ.get('ONYX_API_URL', 'http://onyx-api_server-1:8080')
 key = os.environ.get('ONYX_API_KEY', '')
 
-headers = {'Authorization': f'Bearer {key}'}
+headers = {'x-onyx-key': key}
 
 r = httpx.get(f'{url}/openapi.json', headers=headers)
 d = r.json()

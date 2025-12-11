@@ -227,7 +227,7 @@ def send_to_onyx(documents: list, onyx_url: str, onyx_api_key: str, verbose: boo
     endpoint = f"{onyx_url.rstrip('/')}/onyx-api/ingestion"
 
     headers = {
-        "Authorization": f"Bearer {onyx_api_key}",
+        "x-onyx-key": onyx_api_key,  # Self-hosted Onyx uses x-onyx-key, not Bearer token
         "Content-Type": "application/json",
     }
 
