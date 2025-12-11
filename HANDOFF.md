@@ -1,37 +1,36 @@
 # Developer Handoff: Onyx-RS-Bridge
 
-**Last Updated:** 2025-12-11 03:50 UTC
+**Last Updated:** 2025-12-11 04:40 UTC
 
 ## Project Overview
 
 This is a connector that bridges RepairShopr (repair shop management system) with Onyx (self-hosted AI knowledge platform). It fetches tickets, customers, and assets from RepairShopr and ingests them into Onyx for semantic search and AI-powered insights.
 
-## Current Status
+## Current Status: WORKING ✅
 
-**Working:**
-- RepairShopr API client with rate limiting (150 req/min)
-- Fetching tickets, customers, assets from RS
-- Building Onyx-compatible documents
-- Checkpoint/resume for crash recovery
-- Docker deployment on same host as Onyx
-- Connected to `onyx_default` Docker network
-- Container stays alive after sync for debugging
-
-**In Progress / Current Issue:**
-- Onyx ingestion API returning errors (all 50 docs failed)
-- Added debug logging to see actual Onyx error response
-- Need to find correct Onyx API endpoint for document ingestion
+**All Major Components Operational:**
+- ✅ RepairShopr API client with rate limiting (150 req/min)
+- ✅ Fetching tickets, customers, assets from RS
+- ✅ Building Onyx-compatible documents
+- ✅ Checkpoint/resume for crash recovery
+- ✅ Docker deployment on same host as Onyx
+- ✅ Connected to `onyx_default` Docker network
+- ✅ Onyx authentication (Bearer token)
+- ✅ Document ingestion to Onyx
+- ✅ Retry logic with exponential backoff
+- ✅ Rate limit (429) and server error (5xx) handling
 
 **Not Yet Implemented:**
 - Incremental polling (only full sync works)
-- Proper Onyx connector registration (using direct API calls instead)
+- Batch ingestion (sends one doc at a time)
 
 ## Environment
 
-- **Server:** Alphawulf (Ubuntu)
+- **Server:** Alphawulf (Ubuntu, 10th gen i5, 32GB RAM, 1TB M.2, NO GPU)
 - **Deployment:** Docker on same host as Onyx
 - **Onyx Network:** `onyx_default`
 - **Onyx API Server:** `onyx-api_server-1:8080` (internal Docker network)
+- **Embedding:** CPU-based (slower, 120s timeout configured)
 
 ## Credentials (stored in `/root/Onyx-RS-Bridge/docker/.env`)
 
@@ -42,11 +41,14 @@ ONYX_API_URL=http://onyx-api_server-1:8080
 ONYX_API_KEY=on_9ClEKfKrb1Cr8l9d6Tx7bqS8Cb1W9fWJItdkzpuDPR7VhW03LFt3rQnNmTo1h1fbhPhh9MfMaM0EmzVfhpYYonjD8Cs9MIko2E3N7X30JqqjbZ2Se4m_20EP4p5wNo1aa5HrhxvJW1zmXhXoRxppRe1zDDV1cjCs5rLQa0U0WqQx_OiPJSIjCW4IzGzW8t39Nfb40R8BV_fyCJnQ5p2WtxG11zGyzDwgiOb3DMhD_DayYboOqCIVdxBGMCJKXm9n
 ```
 
+⚠️ **CRITICAL:** Ensure no extra whitespace/newlines in API key. This was the root cause of the initial auth failures.
+
 ## Scale
 
-- **22,056 tickets** in RepairShopr (not a typo)
+- **22,056 tickets** in RepairShopr
 - Full sync will make ~23,000+ API calls to RepairShopr
 - Rate limited at 150 req/min = ~2.5 hours for full sync
+- CPU embeddings add additional time per document
 
 ## Key Files
 
@@ -54,7 +56,7 @@ ONYX_API_KEY=on_9ClEKfKrb1Cr8l9d6Tx7bqS8Cb1W9fWJItdkzpuDPR7VhW03LFt3rQnNmTo1h1fb
 |------|---------|
 | `src/repairshopr_connector/connector.py` | Main connector class, orchestrates sync |
 | `src/repairshopr_connector/client.py` | RepairShopr API client with rate limiting |
-| `src/repairshopr_connector/cli.py` | CLI commands (`rs-onyx sync/test/status`) |
+| `src/repairshopr_connector/cli.py` | CLI commands (`rs-onyx sync/test/status`) + Onyx ingestion |
 | `src/repairshopr_connector/document_builder.py` | Converts RS data to Onyx documents |
 | `src/repairshopr_connector/models.py` | Pydantic models for RS API responses |
 | `docker/docker-compose.yml` | Docker deployment config |
@@ -77,188 +79,72 @@ docker compose down -v && docker compose up -d --build
 
 # Pull latest code and rebuild
 cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
+
+# Run sync with verbose output
+docker exec rs-onyx-connector rs-onyx sync --verbose
 ```
 
 ## Issues Encountered & Fixed
 
-1. **Dockerfile missing README.md** - Build failed because `pyproject.toml` references README.md
+1. **Dockerfile missing README.md** - Build failed
    - Fix: Added `COPY README.md` to Dockerfile
-   - Commit: `cf864f9`
 
 2. **No `__main__` entry point** - Container kept restarting
    - Fix: Changed CMD to `rs-onyx sync`
-   - Commit: `fae2c67`
 
-3. **Permission denied on state file** - Docker volume owned by root, container runs as `connector` user
-   - Fix: Added `mkdir` and `chown` for state directory in Dockerfile
-   - Commit: `cf1103d`
+3. **Permission denied on state file** - Docker volume owned by root
+   - Fix: Added `mkdir` and `chown` for state directory
 
-4. **structlog.stdlib.INFO error** - Wrong import for tenacity retry logging
-   - Fix: Changed to string `"INFO"` instead of `structlog.stdlib.INFO`
-   - Commit: `e64f845`
+4. **structlog.stdlib.INFO error** - Wrong import for tenacity
+   - Fix: Changed to string `"INFO"`
 
-5. **Docker network not connected to Onyx** - Couldn't reach Onyx API
+5. **Docker network not connected to Onyx** - Couldn't reach API
    - Fix: Connected to `onyx_default` external network
-   - Commit: `ee6cb14`
 
-6. **Container exits after sync** - Can't exec into container to debug
+6. **Container exits after sync** - Can't exec into container
    - Fix: Changed CMD to run sync then `sleep infinity`
-   - Commit: `4ab9914`
 
-7. **Onyx API errors not visible** - All 50 docs failed but no error details
-   - Fix: Added debug logging to print endpoint and first 3 error responses
-   - Commit: `4ab9914`
+7. **Wrong Onyx API endpoint** - Was using upload endpoint (404)
+   - Fix: Found correct endpoint via OpenAPI: `/onyx-api/ingestion`
 
-8. **Wrong Onyx API endpoint** - Was using `/api/v1/manage/admin/connector/file/upload` (404)
-   - Discovery: Used `find_endpoints.py` to query `/openapi.json`
-   - Found correct endpoint: `/onyx-api/ingestion` ("Upsert Ingestion Doc")
-   - Fix: Updated `cli.py` to use correct endpoint
-   - Commit: `1f25188`
+8. **Schema mismatch with Onyx** - Documents rejected
+   - Set `source` field to `null`
+   - Convert all metadata values to strings
+   - Added `from_ingestion_api: true` flag
 
-9. **Schema mismatch with Onyx** - Documents rejected due to format issues
-   - Problem 1: `source` field set to "REPAIRSHOPR" (not valid enum) → Set to `null`
-   - Problem 2: `metadata` had int/bool/null values → Convert all to strings
-   - Problem 3: Missing `from_ingestion_api: true` flag → Added
-   - Fix: Updated `document_builder.py` with `_stringify_metadata()` helper
-   - Commit: `549af6e`
+9. **HTTP 401 Invalid API key** - FIXED ✅
+   - **Root Cause:** Extra whitespace/newlines in API key in .env file
+   - **Fix:** Sanitized API key with `.strip()` and ensured clean .env file
+   - **Note:** Header format is `Authorization: Bearer {key}` (NOT x-onyx-key)
 
-10. **HTTP 401 Invalid API key** - Onyx rejecting authentication (FIXED)
-    - Endpoint now correct: `/onyx-api/ingestion`
-    - Schema now correct: documents formatted properly
-    - **Root Cause**: Self-hosted Onyx uses `x-onyx-key` header, NOT `Authorization: Bearer`
-    - **Fix**: Changed header from `Authorization: Bearer {key}` to `x-onyx-key: {key}`
-    - Commit: (pending)
+10. **Timeouts during ingestion** - CPU embeddings slow
+    - **Fix:** Increased timeout from 30s to 120s
+    - **Fix:** Added retry logic with exponential backoff
+    - **Fix:** Handle 429 rate limits and 5xx errors with retries
 
-## Current Status & Path to MVP
+## Session 2025-12-11 Changes
 
-### Where We Are Now
+### Code Changes Made
 
-1. **RepairShopr side: WORKING** ✅
-   - Fetching tickets, customers, assets from RS API
-   - Rate limiting, retry logic, checkpoint/resume all working
-   - Documents being built correctly
+1. **`cli.py` - Refactored `send_to_onyx` function** (lines 216-344)
+   - Added `timeout` parameter (default 120s for CPU embeddings)
+   - Added `max_retries` parameter (default 3)
+   - Added retry logic with exponential backoff
+   - Added 429 rate limit handling with Retry-After support
+   - Added 5xx server error retry
+   - Added API key validation and sanitization (`.strip()`)
+   - Safe debug logging (only shows first 4 chars of key)
+   - Added `--verbose` flag to sync command
 
-2. **Onyx endpoint: WORKING** ✅
-   - Correct endpoint: `POST /onyx-api/ingestion`
-   - No more 404 errors
+2. **Debug scripts added:**
+   - `docker/test_onyx_auth.py` - Tests all auth header formats
 
-3. **Onyx schema: FIXED** ✅
-   - Documents now formatted correctly
-   - Metadata values converted to strings
-   - `from_ingestion_api: true` flag added
-
-4. **Onyx authentication: FIXED** ✅
-   - Changed from `Authorization: Bearer` to `x-onyx-key` header
-   - Self-hosted Onyx uses different auth format than Onyx Cloud
-
-### Schema Analysis (Deep Dive)
-
-**What Onyx Expects (from OpenAPI spec):**
-
-```
-DocumentBase (required fields):
-  - sections: array of TextSection {link: str, text: str}
-  - semantic_identifier: string
-  - metadata: object with STRING values only (no int/bool/null)
-
-Optional fields:
-  - id: string | null
-  - source: DocumentSource enum | null
-  - doc_updated_at: datetime string | null
-  - primary_owners: array of BasicExpertInfo | null
-  - secondary_owners: array of BasicExpertInfo | null
-  - title: string | null
-  - from_ingestion_api: boolean (default false)
-```
-
-**What We're Sending:**
-
-```python
-# From document_builder.py OnyxDocument.to_dict()
-{
-  "id": "rs_ticket_12345",           # ✅ OK
-  "sections": [{"link": "...", "text": "..."}],  # ✅ OK
-  "source": "REPAIRSHOPR",           # ❌ PROBLEM: Not a valid DocumentSource enum
-  "semantic_identifier": "...",       # ✅ OK
-  "metadata": {
-    "ticket_number": 1001,           # ❌ PROBLEM: integer, not string
-    "is_resolved": false,            # ❌ PROBLEM: boolean, not string
-    "customer_id": 5001,             # ❌ PROBLEM: integer, not string
-    ...
-  },
-  "doc_updated_at": "2024-01-15T...", # ✅ OK
-  "primary_owners": [...],            # ✅ OK
-  "secondary_owners": [...],          # ✅ OK
-  "title": "..."                      # ✅ OK
-}
-```
-
-### The 3 Problems to Fix
-
-#### Problem 1: `source` Field
-Onyx expects a `DocumentSource` enum value. "REPAIRSHOPR" is not in that enum.
-
-**Options:**
-- A) Set `source: null` and let Onyx use default (SAFEST - try this first)
-- B) Use an existing enum value like "NOT_APPLICABLE" or "INGESTION_API"
-- C) Check if Onyx allows custom sources via config
-
-#### Problem 2: `metadata` Values Must Be Strings
-Our metadata contains integers, booleans, and nulls. Onyx requires all values to be strings or arrays of strings.
-
-**Fix:** Convert all metadata values to strings:
-```python
-def _stringify_metadata(metadata: dict) -> dict:
-    result = {}
-    for key, value in metadata.items():
-        if value is None:
-            continue  # Skip nulls
-        elif isinstance(value, bool):
-            result[key] = "true" if value else "false"
-        elif isinstance(value, (int, float)):
-            result[key] = str(value)
-        else:
-            result[key] = value
-    return result
-```
-
-#### Problem 3: Test with Real Endpoint
-We changed the endpoint to `/onyx-api/ingestion` but haven't tested yet.
-
-### Recommended Path to MVP
-
-**Step 1: Quick Fix (5 min)**
-Modify `document_builder.py` to:
-1. Set `source = None` instead of "REPAIRSHOPR"
-2. Add `_stringify_metadata()` helper
-3. Add `from_ingestion_api = True` to output
-
-**Step 2: Rebuild & Test (10 min)**
-```bash
-cd ~/Onyx-RS-Bridge && git pull
-cd docker && docker compose down -v && docker compose up -d --build
-docker logs -f rs-onyx-connector
-```
-
-**Step 3: Verify Success**
-- Should see "Sent to Onyx: 50" instead of "Failed: 50"
-- Check Onyx UI for documents
-
-**Step 4: Debug if Still Failing**
-- Check error response for specific field issues
-- Run `check_section_schema.py` to verify TextSection format
-
-### Debug Scripts Available
-
-| Script | Purpose |
-|--------|---------|
-| `docker/probe_onyx.py` | Check which endpoints exist |
-| `docker/find_endpoints.py` | Find document/ingestion endpoints |
-| `docker/check_ingestion_schema.py` | Show ingestion endpoint schema |
-| `docker/check_document_base.py` | Show DocumentBase schema |
-| `docker/check_section_schema.py` | Show TextSection/DocumentSource schemas |
-
-Usage: `cat docker/<script>.py | docker exec -i rs-onyx-connector python3`
+### Git Commits Made:
+- `fix: use x-onyx-key header for self-hosted Onyx authentication` (reverted)
+- `debug: add API key logging to troubleshoot auth issue`
+- `refactor: rewrite send_to_onyx with retry logic, rate limiting, and proper error handling`
+- `fix: increase timeout to 120s for slow Onyx indexing`
+- `debug: test all Onyx auth header formats`
 
 ## Architecture
 
@@ -271,23 +157,32 @@ RepairShopr API
 │  - Fetches data │
 │  - Rate limits  │
 │  - Builds docs  │
+│  - Retries      │
 └────────┬────────┘
          │
          ▼ (onyx_default network)
 ┌─────────────────┐
 │  Onyx API       │ (Docker: onyx-api_server-1:8080)
 │  - Ingestion    │
-│  - Embeddings   │
+│  - Embeddings   │ (CPU-based, ~0.8s per doc)
 │  - Search       │
 └─────────────────┘
 ```
 
+## Verification
+
+Documents are successfully ingesting. Onyx logs confirm:
+```
+Upserted 1 changed docs out of 1 total docs into the DB
+embed_chunks took 0.766 seconds
+```
+
 ## Next Steps
 
-1. **Debug Onyx ingestion** - Check logs for HTTP errors, find correct API endpoint
-2. **Test with small batch** - Modify to only sync 1-2 tickets first
-3. **Verify documents in Onyx** - Check Onyx UI for ingested documents
-4. **Scale up** - Once working, run full 22k ticket sync
+1. ✅ **Auth working** - Bearer token auth confirmed working
+2. ✅ **Ingestion working** - Documents now ingesting to Onyx
+3. **Let full sync complete** - ~2.5+ hours due to volume + CPU embeddings
+4. **Verify search in Onyx UI** - Query for tickets/customers
 5. **Add incremental sync** - Poll for changes instead of full sync each time
 
 ## Contact
