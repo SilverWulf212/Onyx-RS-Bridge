@@ -226,8 +226,13 @@ def send_to_onyx(documents: list, onyx_url: str, onyx_api_key: str, verbose: boo
     # Onyx document ingestion endpoint (discovered via /openapi.json)
     endpoint = f"{onyx_url.rstrip('/')}/onyx-api/ingestion"
 
+    # Debug: log first 10 chars of key to verify it's loaded
+    if verbose or len(documents) > 0:
+        key_preview = onyx_api_key[:10] + "..." if len(onyx_api_key) > 10 else onyx_api_key
+        print(f"\n{YELLOW}[DEBUG] Using API key: {key_preview}{RESET}")
+
     headers = {
-        "x-onyx-key": onyx_api_key,  # Self-hosted Onyx uses x-onyx-key, not Bearer token
+        "Authorization": f"Bearer {onyx_api_key}",
         "Content-Type": "application/json",
     }
 
