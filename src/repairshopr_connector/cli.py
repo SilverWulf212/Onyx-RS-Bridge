@@ -213,6 +213,47 @@ def cmd_test(args, config: dict | None = None):
         return 1
 
 
+def send_to_onyx(documents: list, onyx_url: str, onyx_api_key: str) -> dict:
+    """
+    Send documents to Onyx ingestion API.
+
+    Returns dict with success count and errors.
+    """
+    import httpx
+
+    results = {"success": 0, "failed": 0, "errors": []}
+
+    # Onyx document ingestion endpoint
+    endpoint = f"{onyx_url.rstrip('/')}/api/v1/manage/admin/connector/file/upload"
+
+    headers = {
+        "Authorization": f"Bearer {onyx_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    with httpx.Client(timeout=60.0) as client:
+        for doc in documents:
+            try:
+                # Convert to Onyx format
+                payload = {
+                    "document": doc.to_dict(),
+                }
+
+                response = client.post(endpoint, json=payload, headers=headers)
+
+                if response.status_code in (200, 201):
+                    results["success"] += 1
+                else:
+                    results["failed"] += 1
+                    results["errors"].append(f"{doc.id}: HTTP {response.status_code}")
+
+            except Exception as e:
+                results["failed"] += 1
+                results["errors"].append(f"{doc.id}: {str(e)}")
+
+    return results
+
+
 def cmd_sync(args):
     """Run a sync to Onyx."""
     config = load_config()
@@ -225,8 +266,20 @@ def cmd_sync(args):
         print(f"    export RS_API_KEY=your-api-key")
         return 1
 
+    # Check for Onyx configuration
+    onyx_url = os.environ.get("ONYX_API_URL", "")
+    onyx_api_key = os.environ.get("ONYX_API_KEY", "")
+    send_to_onyx_enabled = bool(onyx_url and onyx_api_key)
+
     print_banner()
     print(f"{BOLD}Starting Full Sync{RESET}\n")
+
+    if send_to_onyx_enabled:
+        print_info(f"Onyx integration enabled: {onyx_url}")
+    else:
+        print_warning("Onyx not configured - documents will be processed but not sent")
+        print_info("Set ONYX_API_URL and ONYX_API_KEY to enable ingestion")
+    print()
 
     try:
         from repairshopr_connector.connector import RepairShoprConnector
@@ -243,22 +296,32 @@ def cmd_sync(args):
         connector.load_credentials({"api_key": config["api_key"]})
 
         total_docs = 0
+        total_sent = 0
+        total_failed = 0
+
         for batch in connector.load_from_state():
             total_docs += len(batch)
-            print(f"\r{BLUE}Documents processed: {total_docs}{RESET}", end="")
 
-            # In real usage, you'd send batch to Onyx here:
-            # for doc in batch:
-            #     onyx_client.ingest(doc.to_dict())
+            if send_to_onyx_enabled:
+                result = send_to_onyx(batch, onyx_url, onyx_api_key)
+                total_sent += result["success"]
+                total_failed += result["failed"]
+                print(f"\r{BLUE}Documents: {total_docs} | Sent to Onyx: {total_sent} | Failed: {total_failed}{RESET}", end="")
+            else:
+                print(f"\r{BLUE}Documents processed: {total_docs}{RESET}", end="")
 
         print(f"\n\n{GREEN}Sync complete!{RESET}")
-        print(f"  Documents: {total_docs}")
+        print(f"  Documents processed: {total_docs}")
+        if send_to_onyx_enabled:
+            print(f"  Sent to Onyx: {total_sent}")
+            if total_failed > 0:
+                print_warning(f"  Failed: {total_failed}")
 
         stats = connector.get_stats()
         if stats.get("checkpoint"):
             errors = stats["checkpoint"].get("errors", [])
             if errors:
-                print_warning(f"  Errors: {len(errors)}")
+                print_warning(f"  Connector errors: {len(errors)}")
                 for err in errors[:5]:
                     print(f"    - {err}")
 

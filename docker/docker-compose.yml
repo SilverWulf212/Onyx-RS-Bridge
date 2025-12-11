@@ -3,8 +3,6 @@
 # Quick Start:
 #   1. Copy .env.example to .env and fill in RS_SUBDOMAIN and RS_API_KEY
 #   2. Run: docker-compose up -d
-#
-# For Onyx integration, uncomment the onyx-network section below.
 
 version: '3.8'
 
@@ -30,8 +28,8 @@ services:
       - RS_POLL_INTERVAL_MINUTES=${RS_POLL_INTERVAL_MINUTES:-10}
       - RS_REQUESTS_PER_MINUTE=${RS_REQUESTS_PER_MINUTE:-150}
 
-      # Onyx configuration (if using Ingestion API)
-      - ONYX_API_URL=${ONYX_API_URL:-http://onyx-api:8080}
+      # Onyx configuration
+      - ONYX_API_URL=${ONYX_API_URL:-http://onyx-api_server-1:8080}
       - ONYX_API_KEY=${ONYX_API_KEY:-}
 
       # Logging
@@ -40,19 +38,11 @@ services:
       # Persist state for crash recovery
       - connector-state:/home/connector/.onyx-rs-bridge
     networks:
-      - rs-connector-network
-      # Uncomment below to connect to existing Onyx network:
-      # - onyx-network
+      - onyx_default
 
 networks:
-  # Default standalone network (always works)
-  rs-connector-network:
-    driver: bridge
-
-  # Uncomment to connect to existing Onyx installation:
-  # onyx-network:
-  #   external: true
-  #   name: onyx_default
+  onyx_default:
+    external: true
 
 volumes:
   connector-state:
