@@ -118,20 +118,33 @@ class OnyxDocument:
         self.source = source
         self.semantic_identifier = semantic_identifier
         self.metadata = metadata
-        self.doc_updated_at = doc_updated_at or datetime.now(timezone.utc)
+        # Ensure doc_updated_at is ALWAYS a timezone-aware UTC datetime
+        # Onyx requires this field to be present and in UTC
+        if doc_updated_at is None:
+            self.doc_updated_at = datetime.now(timezone.utc)
+        elif doc_updated_at.tzinfo is None:
+            # Naive datetime - assume UTC
+            self.doc_updated_at = doc_updated_at.replace(tzinfo=timezone.utc)
+        else:
+            # Convert to UTC
+            self.doc_updated_at = doc_updated_at.astimezone(timezone.utc)
         self.primary_owners = primary_owners or []
         self.secondary_owners = secondary_owners or []
         self.title = title
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization to Onyx API."""
+        # Format timestamp as ISO 8601 with explicit UTC timezone
+        # Onyx requires this exact format for vector DB insertion
+        timestamp = self.doc_updated_at.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
         return {
             "id": self.id,
             "sections": [s.to_dict() for s in self.sections],
             "source": None,  # Let Onyx assign default - custom sources not supported
             "semantic_identifier": self.semantic_identifier,
             "metadata": _stringify_metadata(self.metadata),
-            "doc_updated_at": self.doc_updated_at.isoformat() if self.doc_updated_at else None,
+            "doc_updated_at": timestamp,
             "primary_owners": [o.to_dict() for o in self.primary_owners],
             "secondary_owners": [o.to_dict() for o in self.secondary_owners],
             "title": self.title,
