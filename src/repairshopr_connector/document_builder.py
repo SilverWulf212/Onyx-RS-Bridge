@@ -57,6 +57,28 @@ class BasicExpertInfo:
         return {"display_name": self.display_name, "email": self.email}
 
 
+def _stringify_metadata(metadata: dict[str, Any]) -> dict[str, str | list[str]]:
+    """
+    Convert metadata values to strings for Onyx compatibility.
+
+    Onyx requires all metadata values to be strings or arrays of strings.
+    This function converts integers, booleans, floats, and skips nulls.
+    """
+    result: dict[str, str | list[str]] = {}
+    for key, value in metadata.items():
+        if value is None:
+            continue  # Skip nulls - Onyx doesn't accept them
+        elif isinstance(value, bool):
+            result[key] = "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            result[key] = str(value)
+        elif isinstance(value, list):
+            result[key] = [str(v) for v in value if v is not None]
+        else:
+            result[key] = str(value)
+    return result
+
+
 class OnyxDocument:
     """
     Document structure compatible with Onyx's Document model.
@@ -87,17 +109,18 @@ class OnyxDocument:
         self.title = title
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for JSON serialization to Onyx API."""
         return {
             "id": self.id,
             "sections": [s.to_dict() for s in self.sections],
-            "source": self.source,
+            "source": None,  # Let Onyx assign default - custom sources not supported
             "semantic_identifier": self.semantic_identifier,
-            "metadata": self.metadata,
+            "metadata": _stringify_metadata(self.metadata),
             "doc_updated_at": self.doc_updated_at.isoformat() if self.doc_updated_at else None,
             "primary_owners": [o.to_dict() for o in self.primary_owners],
             "secondary_owners": [o.to_dict() for o in self.secondary_owners],
             "title": self.title,
+            "from_ingestion_api": True,  # Required for ingestion API
         }
 
 

@@ -113,6 +113,13 @@ cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
    - Discovery: Used `find_endpoints.py` to query `/openapi.json`
    - Found correct endpoint: `/onyx-api/ingestion` ("Upsert Ingestion Doc")
    - Fix: Updated `cli.py` to use correct endpoint
+   - Commit: `1f25188`
+
+9. **Schema mismatch with Onyx** - Documents rejected due to format issues
+   - Problem 1: `source` field set to "REPAIRSHOPR" (not valid enum) → Set to `null`
+   - Problem 2: `metadata` had int/bool/null values → Convert all to strings
+   - Problem 3: Missing `from_ingestion_api: true` flag → Added
+   - Fix: Updated `document_builder.py` with `_stringify_metadata()` helper
    - Commit: (pending)
 
 ## Current Status & Path to MVP
