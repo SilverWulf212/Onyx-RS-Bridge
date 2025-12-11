@@ -65,12 +65,44 @@ def get_config_path() -> Path:
 
 
 def load_config() -> dict:
-    """Load configuration from file."""
+    """
+    Load configuration from file, with environment variable fallbacks.
+
+    Priority:
+    1. Config file values
+    2. Environment variables
+    """
+    config = {}
+
+    # Load from file if exists
     config_path = get_config_path()
     if config_path.exists():
         with open(config_path) as f:
-            return json.load(f)
-    return {}
+            config = json.load(f)
+
+    # Environment variable fallbacks (env vars take precedence if set)
+    env_mappings = {
+        "subdomain": "RS_SUBDOMAIN",
+        "api_key": "RS_API_KEY",
+        "include_tickets": "RS_INCLUDE_TICKETS",
+        "include_customers": "RS_INCLUDE_CUSTOMERS",
+        "include_assets": "RS_INCLUDE_ASSETS",
+        "include_invoices": "RS_INCLUDE_INVOICES",
+        "include_internal_comments": "RS_INCLUDE_INTERNAL_COMMENTS",
+    }
+
+    for config_key, env_var in env_mappings.items():
+        env_value = os.environ.get(env_var)
+        if env_value is not None:
+            # Convert string booleans
+            if env_value.lower() in ("true", "1", "yes"):
+                config[config_key] = True
+            elif env_value.lower() in ("false", "0", "no"):
+                config[config_key] = False
+            else:
+                config[config_key] = env_value
+
+    return config
 
 
 def save_config(config: dict) -> None:
@@ -148,7 +180,11 @@ def cmd_test(args, config: dict | None = None):
         config = load_config()
 
     if not config.get("subdomain") or not config.get("api_key"):
-        print_error("Not configured. Run 'rs-onyx setup' first.")
+        print_error("Not configured.")
+        print_info("Option 1: Run 'rs-onyx setup' for interactive setup")
+        print_info("Option 2: Set environment variables:")
+        print(f"    export RS_SUBDOMAIN=yourcompany")
+        print(f"    export RS_API_KEY=your-api-key")
         return 1
 
     print_info(f"Connecting to {config['subdomain']}.repairshopr.com...")
@@ -182,7 +218,11 @@ def cmd_sync(args):
     config = load_config()
 
     if not config.get("subdomain") or not config.get("api_key"):
-        print_error("Not configured. Run 'rs-onyx setup' first.")
+        print_error("Not configured.")
+        print_info("Option 1: Run 'rs-onyx setup' for interactive setup")
+        print_info("Option 2: Set environment variables:")
+        print(f"    export RS_SUBDOMAIN=yourcompany")
+        print(f"    export RS_API_KEY=your-api-key")
         return 1
 
     print_banner()
@@ -369,7 +409,27 @@ For more information, visit:
     args = parser.parse_args()
 
     if args.command is None:
-        parser.print_help()
+        print_banner()
+        print(f"{BOLD}Quick Start:{RESET}")
+        print()
+        print("  1. Set your credentials:")
+        print(f"     {BLUE}export RS_SUBDOMAIN=yourcompany{RESET}")
+        print(f"     {BLUE}export RS_API_KEY=your-api-key{RESET}")
+        print()
+        print("  2. Test the connection:")
+        print(f"     {BLUE}rs-onyx test{RESET}")
+        print()
+        print("  3. Run a sync:")
+        print(f"     {BLUE}rs-onyx sync{RESET}")
+        print()
+        print(f"{BOLD}Or run 'rs-onyx setup' for interactive configuration.{RESET}")
+        print()
+        print("Commands:")
+        print("  setup   - Interactive setup wizard")
+        print("  test    - Test your connection")
+        print("  sync    - Run a full sync")
+        print("  status  - Show sync status")
+        print("  stats   - Show statistics")
         return 0
 
     commands = {
