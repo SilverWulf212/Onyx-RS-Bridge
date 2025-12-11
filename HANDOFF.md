@@ -1,5 +1,7 @@
 # Developer Handoff: Onyx-RS-Bridge
 
+**Last Updated:** 2025-12-11 02:45 UTC
+
 ## Project Overview
 
 This is a connector that bridges RepairShopr (repair shop management system) with Onyx (self-hosted AI knowledge platform). It fetches tickets, customers, and assets from RepairShopr and ingests them into Onyx for semantic search and AI-powered insights.
@@ -13,9 +15,12 @@ This is a connector that bridges RepairShopr (repair shop management system) wit
 - Checkpoint/resume for crash recovery
 - Docker deployment on same host as Onyx
 - Connected to `onyx_default` Docker network
+- Container stays alive after sync for debugging
 
-**In Progress:**
-- Onyx ingestion API integration (just added, needs testing)
+**In Progress / Current Issue:**
+- Onyx ingestion API returning errors (all 50 docs failed)
+- Added debug logging to see actual Onyx error response
+- Need to find correct Onyx API endpoint for document ingestion
 
 **Not Yet Implemented:**
 - Incremental polling (only full sync works)
@@ -78,18 +83,31 @@ cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
 
 1. **Dockerfile missing README.md** - Build failed because `pyproject.toml` references README.md
    - Fix: Added `COPY README.md` to Dockerfile
+   - Commit: `cf864f9`
 
 2. **No `__main__` entry point** - Container kept restarting
    - Fix: Changed CMD to `rs-onyx sync`
+   - Commit: `fae2c67`
 
 3. **Permission denied on state file** - Docker volume owned by root, container runs as `connector` user
    - Fix: Added `mkdir` and `chown` for state directory in Dockerfile
+   - Commit: `cf1103d`
 
 4. **structlog.stdlib.INFO error** - Wrong import for tenacity retry logging
    - Fix: Changed to string `"INFO"` instead of `structlog.stdlib.INFO`
+   - Commit: `e64f845`
 
 5. **Docker network not connected to Onyx** - Couldn't reach Onyx API
    - Fix: Connected to `onyx_default` external network
+   - Commit: `ee6cb14`
+
+6. **Container exits after sync** - Can't exec into container to debug
+   - Fix: Changed CMD to run sync then `sleep infinity`
+   - Commit: `4ab9914`
+
+7. **Onyx API errors not visible** - All 50 docs failed but no error details
+   - Fix: Added debug logging to print endpoint and first 3 error responses
+   - Commit: `4ab9914`
 
 ## Current Issue to Debug
 
