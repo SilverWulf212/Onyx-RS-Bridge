@@ -219,7 +219,7 @@ def send_to_onyx(
     onyx_api_key: str,
     verbose: bool = False,
     batch_size: int = 10,
-    timeout: float = 30.0,
+    timeout: float = 120.0,
     max_retries: int = 3,
 ) -> dict:
     """
