@@ -244,11 +244,26 @@ class RSAppointment(BaseModel):
 
 
 class RSPaginatedResponse(BaseModel):
-    """Generic paginated response from RS API."""
+    """Generic paginated response from RS API.
+
+    Note: RepairShopr returns pagination info in a nested 'meta' object:
+        {'tickets': [...], 'meta': {'total_pages': 442, 'page': 1}}
+
+    We use a model_validator to extract these values.
+    """
 
     page: int = 1
     total_pages: int = 1
     total_entries: int = 0
+
+    @classmethod
+    def model_validate(cls, obj, **kwargs):
+        """Extract pagination from nested 'meta' object if present."""
+        if isinstance(obj, dict) and 'meta' in obj:
+            meta = obj.get('meta', {})
+            # Merge meta fields into root for model parsing
+            obj = {**obj, **meta}
+        return super().model_validate(obj, **kwargs)
 
 
 class RSTicketsResponse(RSPaginatedResponse):
