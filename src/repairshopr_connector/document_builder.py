@@ -27,6 +27,21 @@ DOC_PREFIX_INVOICE = "rs_invoice_"
 DOCUMENT_SOURCE = "REPAIRSHOPR"
 
 
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    """
+    Ensure datetime has UTC timezone.
+
+    Onyx requires all doc_updated_at timestamps to be timezone-aware UTC.
+    RepairShopr API sometimes returns naive datetimes.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # Assume naive datetimes are UTC (RS API behavior)
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 class DocumentSection:
     """
     Represents a section of content in an Onyx document.
@@ -341,7 +356,7 @@ class RepairShoprDocumentBuilder:
             source=DOCUMENT_SOURCE,
             semantic_identifier=semantic_id,
             metadata=metadata,
-            doc_updated_at=ticket.updated_at,
+            doc_updated_at=_ensure_utc(ticket.updated_at),
             primary_owners=primary_owners,
             secondary_owners=secondary_owners,
             title=semantic_id,
@@ -417,7 +432,7 @@ class RepairShoprDocumentBuilder:
             source=DOCUMENT_SOURCE,
             semantic_identifier=semantic_id,
             metadata=metadata,
-            doc_updated_at=customer.updated_at,
+            doc_updated_at=_ensure_utc(customer.updated_at),
             secondary_owners=secondary_owners,
             title=semantic_id,
         )
@@ -496,7 +511,7 @@ class RepairShoprDocumentBuilder:
             source=DOCUMENT_SOURCE,
             semantic_identifier=semantic_id,
             metadata=metadata,
-            doc_updated_at=asset.updated_at,
+            doc_updated_at=_ensure_utc(asset.updated_at),
             secondary_owners=secondary_owners,
             title=semantic_id,
         )
@@ -553,6 +568,6 @@ class RepairShoprDocumentBuilder:
             source=DOCUMENT_SOURCE,
             semantic_identifier=semantic_id,
             metadata=metadata,
-            doc_updated_at=invoice.updated_at,
+            doc_updated_at=_ensure_utc(invoice.updated_at),
             title=semantic_id,
         )
