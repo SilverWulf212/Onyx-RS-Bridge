@@ -1,6 +1,6 @@
 # Developer Handoff: Onyx-RS-Bridge
 
-**Last Updated:** 2025-12-11 03:25 UTC
+**Last Updated:** 2025-12-11 03:35 UTC
 
 ## Project Overview
 
@@ -124,50 +124,106 @@ cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
    - Rate limiting, retry logic, checkpoint/resume all working
    - Documents being built correctly
 
-2. **Onyx side: ALMOST WORKING** 🔄
+2. **Onyx side: SCHEMA MISMATCH** ❌
    - Found correct endpoint: `POST /onyx-api/ingestion`
-   - Discovered via OpenAPI spec at `/openapi.json`
-   - Need to verify our document format matches Onyx's `DocumentBase` schema
+   - Our document format has **3 critical mismatches** with Onyx's expected schema
 
-### What We Just Discovered
+### Schema Analysis (Deep Dive)
 
-**Correct Onyx Ingestion Endpoint:**
+**What Onyx Expects (from OpenAPI spec):**
+
 ```
-POST /onyx-api/ingestion
-Summary: "Upsert Ingestion Doc"
+DocumentBase (required fields):
+  - sections: array of TextSection {link: str, text: str}
+  - semantic_identifier: string
+  - metadata: object with STRING values only (no int/bool/null)
+
+Optional fields:
+  - id: string | null
+  - source: DocumentSource enum | null
+  - doc_updated_at: datetime string | null
+  - primary_owners: array of BasicExpertInfo | null
+  - secondary_owners: array of BasicExpertInfo | null
+  - title: string | null
+  - from_ingestion_api: boolean (default false)
 ```
 
-**Expected Payload Structure:**
-```json
+**What We're Sending:**
+
+```python
+# From document_builder.py OnyxDocument.to_dict()
 {
-  "document": {
-    // DocumentBase schema - need to verify fields match
+  "id": "rs_ticket_12345",           # ✅ OK
+  "sections": [{"link": "...", "text": "..."}],  # ✅ OK
+  "source": "REPAIRSHOPR",           # ❌ PROBLEM: Not a valid DocumentSource enum
+  "semantic_identifier": "...",       # ✅ OK
+  "metadata": {
+    "ticket_number": 1001,           # ❌ PROBLEM: integer, not string
+    "is_resolved": false,            # ❌ PROBLEM: boolean, not string
+    "customer_id": 5001,             # ❌ PROBLEM: integer, not string
+    ...
   },
-  "cc_pair_id": null  // optional
+  "doc_updated_at": "2024-01-15T...", # ✅ OK
+  "primary_owners": [...],            # ✅ OK
+  "secondary_owners": [...],          # ✅ OK
+  "title": "..."                      # ✅ OK
 }
 ```
 
-### Next Steps to MVP
+### The 3 Problems to Fix
 
-1. **Check DocumentBase schema** (in progress)
-   - Run: `cat docker/check_document_base.py | docker exec -i rs-onyx-connector python3`
-   - Compare with our `OnyxDocument.to_dict()` output
+#### Problem 1: `source` Field
+Onyx expects a `DocumentSource` enum value. "REPAIRSHOPR" is not in that enum.
 
-2. **Fix payload format if needed**
-   - Our `document_builder.py` creates documents with: id, sections, source, semantic_identifier, metadata, doc_updated_at, primary_owners, secondary_owners, title
-   - Onyx may expect different field names or structure
+**Options:**
+- A) Set `source: null` and let Onyx use default (SAFEST - try this first)
+- B) Use an existing enum value like "NOT_APPLICABLE" or "INGESTION_API"
+- C) Check if Onyx allows custom sources via config
 
-3. **Rebuild and test with small batch**
-   - Once schema matches, rebuild container
-   - Run sync - should see "Sent to Onyx: 50" instead of "Failed: 50"
+#### Problem 2: `metadata` Values Must Be Strings
+Our metadata contains integers, booleans, and nulls. Onyx requires all values to be strings or arrays of strings.
 
-4. **Verify in Onyx UI**
-   - Check Onyx web interface for ingested documents
-   - Test search functionality
+**Fix:** Convert all metadata values to strings:
+```python
+def _stringify_metadata(metadata: dict) -> dict:
+    result = {}
+    for key, value in metadata.items():
+        if value is None:
+            continue  # Skip nulls
+        elif isinstance(value, bool):
+            result[key] = "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            result[key] = str(value)
+        else:
+            result[key] = value
+    return result
+```
 
-5. **Scale to full 22k tickets**
-   - Once MVP works, run full sync
-   - Monitor for rate limits or errors
+#### Problem 3: Test with Real Endpoint
+We changed the endpoint to `/onyx-api/ingestion` but haven't tested yet.
+
+### Recommended Path to MVP
+
+**Step 1: Quick Fix (5 min)**
+Modify `document_builder.py` to:
+1. Set `source = None` instead of "REPAIRSHOPR"
+2. Add `_stringify_metadata()` helper
+3. Add `from_ingestion_api = True` to output
+
+**Step 2: Rebuild & Test (10 min)**
+```bash
+cd ~/Onyx-RS-Bridge && git pull
+cd docker && docker compose down -v && docker compose up -d --build
+docker logs -f rs-onyx-connector
+```
+
+**Step 3: Verify Success**
+- Should see "Sent to Onyx: 50" instead of "Failed: 50"
+- Check Onyx UI for documents
+
+**Step 4: Debug if Still Failing**
+- Check error response for specific field issues
+- Run `check_section_schema.py` to verify TextSection format
 
 ### Debug Scripts Available
 
@@ -177,6 +233,7 @@ Summary: "Upsert Ingestion Doc"
 | `docker/find_endpoints.py` | Find document/ingestion endpoints |
 | `docker/check_ingestion_schema.py` | Show ingestion endpoint schema |
 | `docker/check_document_base.py` | Show DocumentBase schema |
+| `docker/check_section_schema.py` | Show TextSection/DocumentSource schemas |
 
 Usage: `cat docker/<script>.py | docker exec -i rs-onyx-connector python3`
 
