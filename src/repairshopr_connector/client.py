@@ -219,7 +219,7 @@ class RepairShoprClient:
             retry=retry_if_exception(is_retryable_error),
             stop=stop_after_attempt(self.max_retries),
             wait=wait_exponential(multiplier=2, min=2, max=30),
-            before_sleep=before_sleep_log(log, structlog.stdlib.INFO),
+            before_sleep=before_sleep_log(log, "INFO"),
             reraise=True,
         )
         def _do_request() -> dict[str, Any]:
