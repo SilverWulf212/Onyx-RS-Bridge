@@ -169,6 +169,24 @@ class BoundedLRUCache(Generic[K, V]):
         """Return number of entries (may include expired)."""
         return len(self._cache)
 
+    def values(self) -> list[V]:
+        """
+        Return all non-expired values in the cache.
+
+        Note: Returns a copy to avoid concurrent modification issues.
+        """
+        now = time.monotonic()
+        result: list[V] = []
+
+        with self._lock:
+            for key, entry in self._cache.items():
+                # Skip expired entries
+                if self.ttl_seconds > 0 and now > entry.expires_at:
+                    continue
+                result.append(entry.value)
+
+        return result
+
     def get_stats(self) -> dict[str, Any]:
         """Get cache statistics for monitoring."""
         total = self._hits + self._misses

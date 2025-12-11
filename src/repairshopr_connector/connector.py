@@ -225,27 +225,37 @@ class RepairShoprConnector:
 
         If a previous sync was interrupted, resumes from checkpoint.
         """
-        self._log.info("Starting full load")
-        self.checkpoint.reset_for_new_sync("full")
+        self._log.info("Checking sync state")
+
+        if self._state_mgr.needs_full_sync(self.checkpoint):
+            self._log.info("Starting new full sync")
+            self.checkpoint.reset_for_new_sync("full")
+        else:
+            self._log.info("Resuming previous sync",
+                documents_processed=self.checkpoint.documents_processed,
+                tickets_complete=self.checkpoint.tickets_complete,
+                customers_complete=self.checkpoint.customers_complete)
+
         self._save_checkpoint()
 
         with self.client:
             # Preload enrichment data (eliminates N+1)
+            # This fetches customers/assets once for ticket enrichment
             self._preload_enrichment_data()
 
-            # Load customers
+            # Build customer documents FROM CACHE (no re-fetch!)
             if self.include_customers and not self.checkpoint.customers_complete:
-                yield from self._load_customers()
+                yield from self._load_customers_from_cache()
                 self.checkpoint.customers_complete = True
                 self._save_checkpoint()
 
-            # Load assets
+            # Build asset documents FROM CACHE (no re-fetch!)
             if self.include_assets and not self.checkpoint.assets_complete:
-                yield from self._load_assets()
+                yield from self._load_assets_from_cache()
                 self.checkpoint.assets_complete = True
                 self._save_checkpoint()
 
-            # Load tickets (main content)
+            # Load tickets (main content) - still fetches from API
             if self.include_tickets and not self.checkpoint.tickets_complete:
                 yield from self._load_tickets()
                 self.checkpoint.tickets_complete = True
@@ -266,6 +276,78 @@ class RepairShoprConnector:
             documents=self.checkpoint.documents_processed,
             errors=len(self.checkpoint.errors),
         )
+
+    def _load_customers_from_cache(self) -> GenerateDocumentsOutput:
+        """
+        Build customer documents from already-cached data.
+
+        This avoids re-fetching customers that were loaded during preload.
+        """
+        batch: list[OnyxDocument] = []
+        customers = list(self._cache.customers.values())
+
+        self._log.info("Building customer documents from cache", count=len(customers))
+
+        for customer in customers:
+            # Skip if already processed (for resume)
+            if customer.id in self.checkpoint.customers_seen_ids:
+                continue
+            self.checkpoint.customers_seen_ids.add(customer.id)
+
+            try:
+                doc = self.doc_builder.build_customer_document(customer)
+                batch.append(doc)
+                self.checkpoint.documents_processed += 1
+            except Exception as e:
+                self.checkpoint.errors.append(f"Customer {customer.id}: {e}")
+
+            if len(batch) >= self.batch_size:
+                self._log.info("Yielding customer batch", count=len(batch))
+                yield batch
+                batch = []
+                self._save_checkpoint()
+
+        if batch:
+            self._log.info("Yielding final customer batch", count=len(batch))
+            yield batch
+            self._save_checkpoint()
+
+    def _load_assets_from_cache(self) -> GenerateDocumentsOutput:
+        """
+        Build asset documents from already-cached data.
+
+        This avoids re-fetching assets that were loaded during preload.
+        """
+        batch: list[OnyxDocument] = []
+        assets = list(self._cache.assets.values())
+
+        self._log.info("Building asset documents from cache", count=len(assets))
+
+        for asset in assets:
+            # Skip if already processed (for resume)
+            if asset.id in self.checkpoint.assets_seen_ids:
+                continue
+            self.checkpoint.assets_seen_ids.add(asset.id)
+
+            customer = self._get_customer_cached(asset.customer_id) if asset.customer_id else None
+
+            try:
+                doc = self.doc_builder.build_asset_document(asset, customer)
+                batch.append(doc)
+                self.checkpoint.documents_processed += 1
+            except Exception as e:
+                self.checkpoint.errors.append(f"Asset {asset.id}: {e}")
+
+            if len(batch) >= self.batch_size:
+                self._log.info("Yielding asset batch", count=len(batch))
+                yield batch
+                batch = []
+                self._save_checkpoint()
+
+        if batch:
+            self._log.info("Yielding final asset batch", count=len(batch))
+            yield batch
+            self._save_checkpoint()
 
     def _load_tickets(
         self,

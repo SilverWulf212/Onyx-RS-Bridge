@@ -8,10 +8,12 @@ Synchronous HTTP client with:
 - Request/response logging
 - Input validation
 - Pagination helpers with deduplication
+- Parallel page fetching for improved throughput
 """
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -299,7 +301,7 @@ class RepairShoprClient:
     def get_tickets(
         self,
         page: int = 1,
-        per_page: int = 25,
+        per_page: int = 100,
         customer_id: int | None = None,
         status: str | None = None,
         number: int | None = None,
@@ -404,7 +406,7 @@ class RepairShoprClient:
     def get_customers(
         self,
         page: int = 1,
-        per_page: int = 25,
+        per_page: int = 100,
         query: str | None = None,
     ) -> RSCustomersResponse:
         """Get paginated list of customers."""
@@ -425,17 +427,115 @@ class RepairShoprClient:
         self,
         since: datetime | None = None,
         seen_ids: set[int] | None = None,
+        parallel: bool = True,
+        max_workers: int = 3,
     ) -> Iterator[RSCustomer]:
-        """Iterate through all customers with pagination."""
+        """
+        Iterate through all customers with pagination.
+
+        Args:
+            since: Only yield customers updated after this time
+            seen_ids: Set of already-processed IDs (for deduplication)
+            parallel: Use parallel page fetching for better throughput
+            max_workers: Number of concurrent page fetches (default 3)
+        """
         seen = seen_ids if seen_ids is not None else set()
-        page = 1
 
-        while True:
-            response = self.get_customers(page=page)
+        # First request to get total pages
+        first_response = self.get_customers(page=1)
+        total_pages = first_response.total_pages
 
-            if not response.customers:
-                break
+        if not first_response.customers:
+            return
 
+        # Process first page
+        for customer in first_response.customers:
+            if customer.id in seen:
+                continue
+            seen.add(customer.id)
+
+            if since and customer.updated_at:
+                cust_time = customer.updated_at
+                if cust_time.tzinfo is None:
+                    cust_time = cust_time.replace(tzinfo=timezone.utc)
+                since_utc = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+                if cust_time <= since_utc:
+                    continue
+
+            yield customer
+
+        self._log.info(
+            "Fetched customers page",
+            page=1,
+            total_pages=total_pages,
+            count=len(first_response.customers),
+        )
+
+        if total_pages <= 1:
+            return
+
+        # Fetch remaining pages in parallel
+        if parallel and total_pages > 2:
+            yield from self._fetch_customers_parallel(
+                pages=range(2, total_pages + 1),
+                since=since,
+                seen=seen,
+                max_workers=max_workers,
+            )
+        else:
+            # Sequential fallback
+            for page in range(2, total_pages + 1):
+                response = self.get_customers(page=page)
+                for customer in response.customers:
+                    if customer.id in seen:
+                        continue
+                    seen.add(customer.id)
+
+                    if since and customer.updated_at:
+                        cust_time = customer.updated_at
+                        if cust_time.tzinfo is None:
+                            cust_time = cust_time.replace(tzinfo=timezone.utc)
+                        since_utc = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+                        if cust_time <= since_utc:
+                            continue
+
+                    yield customer
+
+                self._log.info(
+                    "Fetched customers page",
+                    page=page,
+                    total_pages=total_pages,
+                    count=len(response.customers),
+                )
+
+    def _fetch_customers_parallel(
+        self,
+        pages: range,
+        since: datetime | None,
+        seen: set[int],
+        max_workers: int = 3,
+    ) -> Iterator[RSCustomer]:
+        """Fetch multiple customer pages in parallel."""
+        # Collect pages in order for consistent output
+        page_results: dict[int, RSCustomersResponse] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self.get_customers, page=p): p
+                for p in pages
+            }
+
+            for future in as_completed(futures):
+                page_num = futures[future]
+                try:
+                    response = future.result()
+                    page_results[page_num] = response
+                except Exception as e:
+                    self._log.warning(f"Failed to fetch customers page {page_num}: {e}")
+
+        # Yield in page order
+        for page_num in sorted(page_results.keys()):
+            response = page_results[page_num]
             for customer in response.customers:
                 if customer.id in seen:
                     continue
@@ -453,15 +553,10 @@ class RepairShoprClient:
 
             self._log.info(
                 "Fetched customers page",
-                page=page,
-                total_pages=response.total_pages,
+                page=page_num,
+                total_pages=max(page_results.keys()) if page_results else 0,
                 count=len(response.customers),
             )
-
-            if page >= response.total_pages:
-                break
-
-            page += 1
 
     def get_all_customers_dict(self) -> dict[int, RSCustomer]:
         """
@@ -481,7 +576,7 @@ class RepairShoprClient:
     def get_assets(
         self,
         page: int = 1,
-        per_page: int = 25,
+        per_page: int = 100,
         customer_id: int | None = None,
         asset_type_id: int | None = None,
         query: str | None = None,
@@ -508,17 +603,114 @@ class RepairShoprClient:
         self,
         since: datetime | None = None,
         seen_ids: set[int] | None = None,
+        parallel: bool = True,
+        max_workers: int = 3,
     ) -> Iterator[RSAsset]:
-        """Iterate through all assets with pagination."""
+        """
+        Iterate through all assets with pagination.
+
+        Args:
+            since: Only yield assets updated after this time
+            seen_ids: Set of already-processed IDs (for deduplication)
+            parallel: Use parallel page fetching for better throughput
+            max_workers: Number of concurrent page fetches (default 3)
+        """
         seen = seen_ids if seen_ids is not None else set()
-        page = 1
 
-        while True:
-            response = self.get_assets(page=page)
+        # First request to get total pages
+        first_response = self.get_assets(page=1)
+        total_pages = first_response.total_pages
 
-            if not response.assets:
-                break
+        if not first_response.assets:
+            return
 
+        # Process first page
+        for asset in first_response.assets:
+            if asset.id in seen:
+                continue
+            seen.add(asset.id)
+
+            if since and asset.updated_at:
+                asset_time = asset.updated_at
+                if asset_time.tzinfo is None:
+                    asset_time = asset_time.replace(tzinfo=timezone.utc)
+                since_utc = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+                if asset_time <= since_utc:
+                    continue
+
+            yield asset
+
+        self._log.info(
+            "Fetched assets page",
+            page=1,
+            total_pages=total_pages,
+            count=len(first_response.assets),
+        )
+
+        if total_pages <= 1:
+            return
+
+        # Fetch remaining pages in parallel
+        if parallel and total_pages > 2:
+            yield from self._fetch_assets_parallel(
+                pages=range(2, total_pages + 1),
+                since=since,
+                seen=seen,
+                max_workers=max_workers,
+            )
+        else:
+            # Sequential fallback
+            for page in range(2, total_pages + 1):
+                response = self.get_assets(page=page)
+                for asset in response.assets:
+                    if asset.id in seen:
+                        continue
+                    seen.add(asset.id)
+
+                    if since and asset.updated_at:
+                        asset_time = asset.updated_at
+                        if asset_time.tzinfo is None:
+                            asset_time = asset_time.replace(tzinfo=timezone.utc)
+                        since_utc = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+                        if asset_time <= since_utc:
+                            continue
+
+                    yield asset
+
+                self._log.info(
+                    "Fetched assets page",
+                    page=page,
+                    total_pages=total_pages,
+                    count=len(response.assets),
+                )
+
+    def _fetch_assets_parallel(
+        self,
+        pages: range,
+        since: datetime | None,
+        seen: set[int],
+        max_workers: int = 3,
+    ) -> Iterator[RSAsset]:
+        """Fetch multiple asset pages in parallel."""
+        page_results: dict[int, RSAssetsResponse] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self.get_assets, page=p): p
+                for p in pages
+            }
+
+            for future in as_completed(futures):
+                page_num = futures[future]
+                try:
+                    response = future.result()
+                    page_results[page_num] = response
+                except Exception as e:
+                    self._log.warning(f"Failed to fetch assets page {page_num}: {e}")
+
+        # Yield in page order
+        for page_num in sorted(page_results.keys()):
+            response = page_results[page_num]
             for asset in response.assets:
                 if asset.id in seen:
                     continue
@@ -536,15 +728,10 @@ class RepairShoprClient:
 
             self._log.info(
                 "Fetched assets page",
-                page=page,
-                total_pages=response.total_pages,
+                page=page_num,
+                total_pages=max(page_results.keys()) if page_results else 0,
                 count=len(response.assets),
             )
-
-            if page >= response.total_pages:
-                break
-
-            page += 1
 
     def get_all_assets_dict(self) -> dict[int, RSAsset]:
         """Fetch all assets into a lookup dictionary."""
@@ -568,7 +755,7 @@ class RepairShoprClient:
     def get_invoices(
         self,
         page: int = 1,
-        per_page: int = 25,
+        per_page: int = 100,
         customer_id: int | None = None,
     ) -> RSInvoicesResponse:
         """Get paginated list of invoices."""
