@@ -213,60 +213,133 @@ def cmd_test(args, config: dict | None = None):
         return 1
 
 
-def send_to_onyx(documents: list, onyx_url: str, onyx_api_key: str, verbose: bool = False) -> dict:
+def send_to_onyx(
+    documents: list,
+    onyx_url: str,
+    onyx_api_key: str,
+    verbose: bool = False,
+    batch_size: int = 10,
+    timeout: float = 30.0,
+    max_retries: int = 3,
+) -> dict:
     """
     Send documents to Onyx ingestion API.
 
-    Returns dict with success count and errors.
+    Args:
+        documents: List of OnyxDocument objects to send
+        onyx_url: Base URL of Onyx API
+        onyx_api_key: API key for authentication
+        verbose: Enable verbose logging
+        batch_size: Number of documents per batch (for progress reporting)
+        timeout: HTTP request timeout in seconds
+        max_retries: Maximum retry attempts for transient failures
+
+    Returns:
+        dict with success count, failed count, and error list
     """
     import httpx
+    import time
 
     results = {"success": 0, "failed": 0, "errors": []}
 
-    # Onyx document ingestion endpoint (discovered via /openapi.json)
+    # Validate API key
+    if not onyx_api_key or not onyx_api_key.strip():
+        print_error("ONYX_API_KEY is empty or not set")
+        results["errors"].append("Missing API key")
+        return results
+
+    # Sanitize API key (remove whitespace, newlines)
+    onyx_api_key = onyx_api_key.strip()
+
+    # Onyx document ingestion endpoint
     endpoint = f"{onyx_url.rstrip('/')}/onyx-api/ingestion"
 
-    # Debug: log first 10 chars of key to verify it's loaded
-    if verbose or len(documents) > 0:
-        key_preview = onyx_api_key[:10] + "..." if len(onyx_api_key) > 10 else onyx_api_key
-        print(f"\n{YELLOW}[DEBUG] Using API key: {key_preview}{RESET}")
+    # Safe debug logging (only show first 4 chars - enough to verify, not enough to compromise)
+    if verbose:
+        key_preview = onyx_api_key[:4] + "****" if len(onyx_api_key) > 4 else "****"
+        print(f"\n{YELLOW}[DEBUG] API key starts with: {key_preview}{RESET}")
+        print(f"{YELLOW}[DEBUG] Onyx endpoint: {endpoint}{RESET}")
 
     headers = {
         "Authorization": f"Bearer {onyx_api_key}",
         "Content-Type": "application/json",
     }
 
-    # Log first attempt for debugging
-    if verbose or len(documents) > 0:
-        print(f"\n{YELLOW}[DEBUG] Onyx endpoint: {endpoint}{RESET}")
+    def send_with_retry(client: httpx.Client, doc, attempt: int = 1) -> tuple[bool, str]:
+        """Send a single document with retry logic."""
+        try:
+            payload = {"document": doc.to_dict()}
+            response = client.post(endpoint, json=payload, headers=headers)
 
-    with httpx.Client(timeout=60.0) as client:
-        for i, doc in enumerate(documents):
-            try:
-                # Convert to Onyx format
-                payload = {
-                    "document": doc.to_dict(),
-                }
+            # Success
+            if response.status_code in (200, 201, 202, 204):
+                return True, ""
 
-                response = client.post(endpoint, json=payload, headers=headers)
+            # Rate limited - back off and retry
+            if response.status_code == 429:
+                if attempt <= max_retries:
+                    wait_time = min(2 ** attempt, 30)  # Exponential backoff, max 30s
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after and retry_after.isdigit():
+                        wait_time = int(retry_after)
+                    if verbose:
+                        print(f"\n{YELLOW}[RATE LIMIT] Waiting {wait_time}s before retry...{RESET}")
+                    time.sleep(wait_time)
+                    return send_with_retry(client, doc, attempt + 1)
+                return False, f"Rate limited after {max_retries} retries"
 
-                if response.status_code in (200, 201):
-                    results["success"] += 1
-                else:
-                    results["failed"] += 1
-                    error_msg = f"{doc.id}: HTTP {response.status_code}"
-                    results["errors"].append(error_msg)
-                    # Log first few errors for debugging
-                    if results["failed"] <= 3:
-                        print(f"\n{RED}[ERROR] {error_msg}{RESET}")
-                        print(f"{RED}[ERROR] Response: {response.text[:200]}{RESET}")
+            # Server error - retry with backoff
+            if response.status_code >= 500:
+                if attempt <= max_retries:
+                    wait_time = 2 ** attempt
+                    if verbose:
+                        print(f"\n{YELLOW}[SERVER ERROR] Retry {attempt}/{max_retries} in {wait_time}s...{RESET}")
+                    time.sleep(wait_time)
+                    return send_with_retry(client, doc, attempt + 1)
+                return False, f"Server error {response.status_code} after {max_retries} retries"
 
-            except Exception as e:
+            # Client error (4xx) - don't retry, log response
+            error_detail = response.text[:200] if response.text else "No response body"
+            return False, f"HTTP {response.status_code}: {error_detail}"
+
+        except httpx.TimeoutException:
+            if attempt <= max_retries:
+                if verbose:
+                    print(f"\n{YELLOW}[TIMEOUT] Retry {attempt}/{max_retries}...{RESET}")
+                return send_with_retry(client, doc, attempt + 1)
+            return False, f"Timeout after {max_retries} retries"
+
+        except httpx.RequestError as e:
+            if attempt <= max_retries:
+                time.sleep(2 ** attempt)
+                return send_with_retry(client, doc, attempt + 1)
+            return False, f"Request error: {str(e)}"
+
+        except Exception as e:
+            return False, f"Unexpected error: {str(e)}"
+
+    # Send documents with connection pooling
+    with httpx.Client(timeout=timeout) as client:
+        error_log_count = 0
+        max_error_logs = 3  # Only log first 3 errors to avoid spam
+
+        for doc in documents:
+            success, error_msg = send_with_retry(client, doc)
+
+            if success:
+                results["success"] += 1
+            else:
                 results["failed"] += 1
-                error_msg = f"{doc.id}: {str(e)}"
-                results["errors"].append(error_msg)
-                if results["failed"] <= 3:
-                    print(f"\n{RED}[ERROR] {error_msg}{RESET}")
+                full_error = f"{doc.id}: {error_msg}"
+                results["errors"].append(full_error)
+
+                # Log first few errors for debugging
+                if error_log_count < max_error_logs:
+                    print(f"\n{RED}[ERROR] {full_error}{RESET}")
+                    error_log_count += 1
+                elif error_log_count == max_error_logs:
+                    print(f"\n{RED}[ERROR] ... suppressing further error logs{RESET}")
+                    error_log_count += 1
 
     return results
 
@@ -320,7 +393,8 @@ def cmd_sync(args):
             total_docs += len(batch)
 
             if send_to_onyx_enabled:
-                result = send_to_onyx(batch, onyx_url, onyx_api_key)
+                verbose = getattr(args, 'verbose', False)
+                result = send_to_onyx(batch, onyx_url, onyx_api_key, verbose=verbose)
                 total_sent += result["success"]
                 total_failed += result["failed"]
                 print(f"\r{BLUE}Documents: {total_docs} | Sent to Onyx: {total_sent} | Failed: {total_failed}{RESET}", end="")
@@ -479,6 +553,7 @@ For more information, visit:
     # Sync command
     sync_parser = subparsers.add_parser("sync", help="Run a full sync")
     sync_parser.add_argument("--dry-run", action="store_true", help="Don't actually send to Onyx")
+    sync_parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose debug output")
 
     # Status command
     subparsers.add_parser("status", help="Show sync status")
