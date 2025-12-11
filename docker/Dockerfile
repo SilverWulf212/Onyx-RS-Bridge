@@ -47,5 +47,5 @@ ENV PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "from repairshopr_connector import RepairShoprConnector; print('OK')"
 
-# Default command - can be overridden
-CMD ["python", "-m", "repairshopr_connector.connector"]
+# Default command - run sync (can be overridden)
+CMD ["rs-onyx", "sync"]

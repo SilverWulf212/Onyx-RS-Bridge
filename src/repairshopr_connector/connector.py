@@ -510,3 +510,9 @@ class RepairShoprConnector:
 
         with self.client:
             return self.client.health_check()
+
+
+if __name__ == "__main__":
+    # When run directly, execute the CLI
+    from repairshopr_connector.cli import main
+    main()
