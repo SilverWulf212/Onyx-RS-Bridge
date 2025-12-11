@@ -1,6 +1,6 @@
 # Developer Handoff: Onyx-RS-Bridge
 
-**Last Updated:** 2025-12-11 03:35 UTC
+**Last Updated:** 2025-12-11 03:50 UTC
 
 ## Project Overview
 
@@ -120,7 +120,25 @@ cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
    - Problem 2: `metadata` had int/bool/null values → Convert all to strings
    - Problem 3: Missing `from_ingestion_api: true` flag → Added
    - Fix: Updated `document_builder.py` with `_stringify_metadata()` helper
-   - Commit: (pending)
+   - Commit: `549af6e`
+
+10. **HTTP 401 Invalid API key** - Onyx rejecting authentication (CURRENT ISSUE)
+    - Endpoint now correct: `/onyx-api/ingestion`
+    - Schema now correct: documents formatted properly
+    - Error: `{"detail":"Invalid API key"}`
+    - Likely cause: API key not being passed correctly, or wrong key format
+    - Debug commands:
+      ```bash
+      # Check API key in container
+      docker exec rs-onyx-connector printenv ONYX_API_KEY | head -c 30
+
+      # Check API key in .env file
+      grep ONYX_API_KEY ~/Onyx-RS-Bridge/docker/.env | head -c 50
+      ```
+    - Things to verify:
+      1. Is the Onyx API key valid? (check in Onyx Admin UI)
+      2. Is it a user API key or admin API key? (ingestion may require admin)
+      3. Is the `Authorization: Bearer <key>` format correct for Onyx?
 
 ## Current Status & Path to MVP
 
@@ -131,9 +149,18 @@ cd ~/Onyx-RS-Bridge && git pull && cd docker && docker compose up -d --build
    - Rate limiting, retry logic, checkpoint/resume all working
    - Documents being built correctly
 
-2. **Onyx side: SCHEMA MISMATCH** ❌
-   - Found correct endpoint: `POST /onyx-api/ingestion`
-   - Our document format has **3 critical mismatches** with Onyx's expected schema
+2. **Onyx endpoint: WORKING** ✅
+   - Correct endpoint: `POST /onyx-api/ingestion`
+   - No more 404 errors
+
+3. **Onyx schema: FIXED** ✅
+   - Documents now formatted correctly
+   - Metadata values converted to strings
+   - `from_ingestion_api: true` flag added
+
+4. **Onyx authentication: FAILING** ❌
+   - HTTP 401: `{"detail":"Invalid API key"}`
+   - Need to verify API key is valid and has correct permissions
 
 ### Schema Analysis (Deep Dive)
 
