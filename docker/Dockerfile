@@ -35,7 +35,9 @@ COPY config/ ./config/
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash connector && \
-    chown -R connector:connector /app
+    chown -R connector:connector /app && \
+    mkdir -p /home/connector/.onyx-rs-bridge && \
+    chown -R connector:connector /home/connector/.onyx-rs-bridge
 
 USER connector
 
