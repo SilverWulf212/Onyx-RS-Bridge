@@ -49,5 +49,5 @@ ENV PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "from repairshopr_connector import RepairShoprConnector; print('OK')"
 
-# Default command - run sync (can be overridden)
-CMD ["rs-onyx", "sync"]
+# Default command - run sync then sleep (keeps container alive for debugging)
+CMD ["sh", "-c", "rs-onyx sync; echo 'Sync finished. Container staying alive for debugging...'; sleep infinity"]

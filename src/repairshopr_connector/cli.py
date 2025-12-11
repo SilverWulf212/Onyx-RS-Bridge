@@ -213,7 +213,7 @@ def cmd_test(args, config: dict | None = None):
         return 1
 
 
-def send_to_onyx(documents: list, onyx_url: str, onyx_api_key: str) -> dict:
+def send_to_onyx(documents: list, onyx_url: str, onyx_api_key: str, verbose: bool = False) -> dict:
     """
     Send documents to Onyx ingestion API.
 
@@ -231,8 +231,12 @@ def send_to_onyx(documents: list, onyx_url: str, onyx_api_key: str) -> dict:
         "Content-Type": "application/json",
     }
 
+    # Log first attempt for debugging
+    if verbose or len(documents) > 0:
+        print(f"\n{YELLOW}[DEBUG] Onyx endpoint: {endpoint}{RESET}")
+
     with httpx.Client(timeout=60.0) as client:
-        for doc in documents:
+        for i, doc in enumerate(documents):
             try:
                 # Convert to Onyx format
                 payload = {
@@ -245,11 +249,19 @@ def send_to_onyx(documents: list, onyx_url: str, onyx_api_key: str) -> dict:
                     results["success"] += 1
                 else:
                     results["failed"] += 1
-                    results["errors"].append(f"{doc.id}: HTTP {response.status_code}")
+                    error_msg = f"{doc.id}: HTTP {response.status_code}"
+                    results["errors"].append(error_msg)
+                    # Log first few errors for debugging
+                    if results["failed"] <= 3:
+                        print(f"\n{RED}[ERROR] {error_msg}{RESET}")
+                        print(f"{RED}[ERROR] Response: {response.text[:200]}{RESET}")
 
             except Exception as e:
                 results["failed"] += 1
-                results["errors"].append(f"{doc.id}: {str(e)}")
+                error_msg = f"{doc.id}: {str(e)}"
+                results["errors"].append(error_msg)
+                if results["failed"] <= 3:
+                    print(f"\n{RED}[ERROR] {error_msg}{RESET}")
 
     return results
 
